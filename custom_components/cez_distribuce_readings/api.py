@@ -49,6 +49,20 @@ class CezDistribuceClient:
 
         self.session = requests.Session()
         self.session.max_redirects = 10
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "application/json,text/plain,*/*;q=0.8"
+                ),
+                "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
+            }
+        )
         self._logged_in = False
 
         self.service_url = (
@@ -117,6 +131,51 @@ class CezDistribuceClient:
 
         response.raise_for_status()
 
+    def _login_form_payload(self, html: str) -> tuple[str, dict[str, str]]:
+        """Build CAS login form action and payload from the actual HTML form."""
+        soup = BeautifulSoup(html, "html.parser")
+        execution_input = soup.find("input", {"name": "execution"})
+
+        if not execution_input or not execution_input.get("value"):
+            _LOGGER.error(
+                "CAS login page did not contain execution token. body_start=%r",
+                html[:1000],
+            )
+            raise CezDistribuceAuthError("CAS login form did not contain execution token")
+
+        form = execution_input.find_parent("form") or soup.find("form")
+        form_action = self.login_url
+
+        if form and form.get("action"):
+            form_action = urllib.parse.urljoin(self.login_url, form.get("action"))
+
+        payload: dict[str, str] = {}
+
+        if form:
+            for input_tag in form.find_all("input"):
+                name = input_tag.get("name")
+                if not name:
+                    continue
+                payload[name] = input_tag.get("value", "")
+
+        payload.update(
+            {
+                "username": self.username,
+                "password": self.password,
+                "execution": execution_input["value"],
+                "_eventId": "submit",
+                "geolocation": payload.get("geolocation", ""),
+            }
+        )
+
+        _LOGGER.debug(
+            "CAS login form prepared. action=%s fields=%s",
+            form_action,
+            sorted(payload.keys()),
+        )
+
+        return form_action, payload
+
     def login(self) -> None:
         """Login and refresh portal X-Request-Token."""
         _LOGGER.debug("Logging in to ČEZ Distribuce portal")
@@ -125,24 +184,14 @@ class CezDistribuceClient:
         self._debug_response("CAS login page response", response)
         response.raise_for_status()
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        execution_input = soup.find("input", {"name": "execution"})
-
-        if not execution_input or not execution_input.get("value"):
-            _LOGGER.error(
-                "CAS login page did not contain execution token. body_start=%r",
-                response.text[:1000],
-            )
-            raise CezDistribuceAuthError("CAS login form did not contain execution token")
+        form_action, form_payload = self._login_form_payload(response.text)
 
         response = self.session.post(
-            self.login_url,
-            data={
-                "username": self.username,
-                "password": self.password,
-                "execution": execution_input["value"],
-                "_eventId": "submit",
-                "geolocation": "",
+            form_action,
+            data=form_payload,
+            headers={
+                "Origin": CAS_BASE_URL.replace("/cas", ""),
+                "Referer": self.login_url,
             },
             timeout=TIMEOUT,
         )
@@ -183,6 +232,40 @@ class CezDistribuceClient:
         if not self._logged_in:
             self.login()
 
+    def _extract_token_from_payload(self, payload: Any) -> str | None:
+        """Extract X-Request-Token from possible ČEZ token payload shapes."""
+        if isinstance(payload, str):
+            token = payload.strip()
+            return token or None
+
+        if isinstance(payload, dict):
+            for key in (
+                "data",
+                "token",
+                "requestToken",
+                "xRequestToken",
+                "X-Request-Token",
+                "xsrfToken",
+                "csrfToken",
+            ):
+                value = payload.get(key)
+
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+                if isinstance(value, dict):
+                    nested = self._extract_token_from_payload(value)
+                    if nested:
+                        return nested
+
+            for value in payload.values():
+                if isinstance(value, dict):
+                    nested = self._extract_token_from_payload(value)
+                    if nested:
+                        return nested
+
+        return None
+
     def refresh_api_token(self) -> None:
         """Fetch and store X-Request-Token."""
         url = f"{self.base_url}/rest-auth-api?path=/token/get"
@@ -191,7 +274,7 @@ class CezDistribuceClient:
         response.raise_for_status()
 
         try:
-            token = response.json()
+            payload = response.json()
         except ValueError as err:
             _LOGGER.error(
                 "ČEZ token response is not JSON. status=%s content_type=%s body_start=%r",
@@ -201,11 +284,13 @@ class CezDistribuceClient:
             )
             raise CezDistribuceAuthError("Unable to fetch JSON X-Request-Token") from err
 
-        if not isinstance(token, str) or not token:
+        token = self._extract_token_from_payload(payload)
+
+        if not token:
             _LOGGER.error(
-                "Unexpected ČEZ token payload type=%s value=%r",
-                type(token).__name__,
-                token,
+                "Unexpected ČEZ token payload shape. type=%s keys=%s",
+                type(payload).__name__,
+                list(payload.keys()) if isinstance(payload, dict) else None,
             )
             raise CezDistribuceAuthError("Unable to fetch X-Request-Token")
 
