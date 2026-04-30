@@ -1,0 +1,50 @@
+{
+  "title": "ČEZ Distribuce Readings",
+  "config": {
+    "step": {
+      "user": {
+        "title": "ČEZ Distribuce Readings",
+        "description": "Zadej přihlašovací údaje do Distribučního portálu ČEZ.",
+        "data": {
+          "username": "Uživatelské jméno / e-mail",
+          "password": "Heslo",
+          "scan_interval": "Interval aktualizace",
+          "detailed_history": "Použít detailní historii odečtů"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nepodařilo se přihlásit nebo načíst data z portálu ČEZ Distribuce."
+    },
+    "abort": {
+      "already_configured": "Tento účet už je nakonfigurovaný."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "state_vt": {
+        "name": "Stav VT"
+      },
+      "state_nt": {
+        "name": "Stav NT"
+      },
+      "state_total": {
+        "name": "Stav celkem"
+      },
+      "last_period_vt": {
+        "name": "Spotřeba poslední období VT"
+      },
+      "last_period_nt": {
+        "name": "Spotřeba poslední období NT"
+      },
+      "last_period_total": {
+        "name": "Spotřeba poslední období celkem"
+      }
+    },
+    "binary_sensor": {
+      "low_tariff_active": {
+        "name": "Nízký tarif aktivní"
+      }
+    }
+  }
+}
