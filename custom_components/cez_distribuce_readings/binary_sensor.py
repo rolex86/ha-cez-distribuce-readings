@@ -58,7 +58,11 @@ def _local_tz():
 
 
 def _parse_date(value: Any) -> date | None:
-    """Parse ČEZ date value."""
+    """Parse ČEZ date value.
+
+    ČEZ signal endpoint currently returns dates as DD.MM.YYYY, while some other
+    endpoints use ISO-like YYYY-MM-DDTHH:MM:SS strings. Accept both.
+    """
     if value is None:
         return None
 
@@ -66,14 +70,45 @@ def _parse_date(value: Any) -> date | None:
     if not text:
         return None
 
+    # ISO datetime/date, for example 2026-04-30T00:00:00 or 2026-04-30.
     try:
         return date.fromisoformat(text.split("T")[0])
+    except ValueError:
+        pass
+
+    # Czech ČEZ signal date, for example 30.04.2026.
+    try:
+        return datetime.strptime(text, "%d.%m.%Y").date()
     except ValueError:
         return None
 
 
 def _parse_time(value: Any) -> time | None:
-    """Parse time in HHMM or HH:MM format."""
+    """Parse time in HHMM or HH:MM format.
+
+    This helper is for ordinary times only. 24:00 is handled by
+    _datetime_from_hm because Python's time type does not allow hour 24.
+    """
+    if value is None:
+        return None
+
+    parsed = _parse_hm(value)
+    if parsed is None:
+        return None
+
+    hour, minute = parsed
+
+    if hour == 24 and minute == 0:
+        return time(0, 0)
+
+    if hour > 23 or minute > 59:
+        return None
+
+    return time(hour, minute)
+
+
+def _parse_hm(value: Any) -> tuple[int, int] | None:
+    """Parse HHMM or HH:MM into hour/minute, allowing 24:00."""
     if value is None:
         return None
 
@@ -92,10 +127,24 @@ def _parse_time(value: Any) -> time | None:
     hour = int(text[:2])
     minute = int(text[2:])
 
-    if hour > 23 or minute > 59:
+    if minute > 59:
         return None
 
-    return time(hour, minute)
+    if hour > 24:
+        return None
+
+    if hour == 24 and minute != 0:
+        return None
+
+    return hour, minute
+
+
+def _datetime_from_hm(day: date, hour: int, minute: int) -> datetime:
+    """Build local datetime from date/hour/minute, supporting 24:00."""
+    if hour == 24 and minute == 0:
+        return datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=_local_tz())
+
+    return datetime.combine(day, time(hour, minute), tzinfo=_local_tz())
 
 
 def _find_date_in_dict(item: dict[str, Any]) -> date | None:
@@ -117,15 +166,22 @@ def _find_date_in_dict(item: dict[str, Any]) -> date | None:
 
 
 def _parse_time_ranges_from_string(day: date, value: str) -> list[tuple[datetime, datetime]]:
-    """Parse all time ranges from a text value."""
+    """Parse all time ranges from a text value.
+
+    Example ČEZ value:
+    00:00-00:45;   01:45-08:40;   18:10-24:00
+    """
     intervals: list[tuple[datetime, datetime]] = []
 
     for match in TIME_RANGE_RE.finditer(value):
-        start = time(int(match.group("sh")), int(match.group("sm")))
-        end = time(int(match.group("eh")), int(match.group("em")))
+        start_hm = _parse_hm(f"{match.group('sh')}:{match.group('sm')}")
+        end_hm = _parse_hm(f"{match.group('eh')}:{match.group('em')}")
 
-        start_dt = datetime.combine(day, start, tzinfo=_local_tz())
-        end_dt = datetime.combine(day, end, tzinfo=_local_tz())
+        if start_hm is None or end_hm is None:
+            continue
+
+        start_dt = _datetime_from_hm(day, start_hm[0], start_hm[1])
+        end_dt = _datetime_from_hm(day, end_hm[0], end_hm[1])
 
         if end_dt <= start_dt:
             end_dt += timedelta(days=1)
@@ -155,14 +211,14 @@ def _parse_direct_interval(day: date, item: dict[str, Any]) -> list[tuple[dateti
             end_value = lowered[key.lower()]
             break
 
-    start = _parse_time(start_value)
-    end = _parse_time(end_value)
+    start_hm = _parse_hm(start_value)
+    end_hm = _parse_hm(end_value)
 
-    if not start or not end:
+    if start_hm is None or end_hm is None:
         return []
 
-    start_dt = datetime.combine(day, start, tzinfo=_local_tz())
-    end_dt = datetime.combine(day, end, tzinfo=_local_tz())
+    start_dt = _datetime_from_hm(day, start_hm[0], start_hm[1])
+    end_dt = _datetime_from_hm(day, end_hm[0], end_hm[1])
 
     if end_dt <= start_dt:
         end_dt += timedelta(days=1)
@@ -173,10 +229,10 @@ def _parse_direct_interval(day: date, item: dict[str, Any]) -> list[tuple[dateti
 def _extract_intervals(data: Any, inherited_day: date | None = None) -> list[tuple[datetime, datetime]]:
     """Extract signal intervals from a ČEZ response.
 
-    The ČEZ response shape can differ, so this parser intentionally accepts:
-    - dicts with datum + casy
-    - dicts with datum + od/do
-    - nested lists/dicts
+    Accepted shapes include:
+    - {"signals": [{"datum": "30.04.2026", "casy": "00:00-00:45; ..."}]}
+    - envelope-unwrapped data from {"data": {"signals": [...]}}
+    - nested lists/dicts with date + intervals
     - string ranges like 01:00-05:00 or 0100-0500
     """
     intervals: list[tuple[datetime, datetime]] = []
