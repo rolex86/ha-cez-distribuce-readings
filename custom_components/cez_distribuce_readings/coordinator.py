@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import CezDistribuceClient, CezDistribuceError
+from .archive import build_archive, save_archive
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -110,6 +112,9 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         readings_by_uid: dict[str, list[dict[str, Any]]] = {}
         details_by_uid: dict[str, dict[str, Any]] = {}
         signals_by_uid: dict[str, Any] = {}
+        archives_by_uid: dict[str, dict[str, Any]] = {}
+
+        archive_dir = Path(self.hass.config.path("cez_distribuce_readings"))
 
         for point in points:
             uid = point.get("uid")
@@ -126,16 +131,33 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as err:
                 _LOGGER.warning("Unable to fetch supply point detail for uid=%s: %s", uid, err)
 
+            ean = extract_ean(detail, point)
+
             try:
-                readings_by_uid[uid] = self.client.get_meter_reading_history(
+                readings = self.client.get_meter_reading_history(
                     uid,
                     detailed=self.detailed_history,
                 )
-            except Exception as err:
-                _LOGGER.warning("Unable to fetch readings for uid=%s: %s", uid, err)
-                readings_by_uid[uid] = []
+                readings_by_uid[uid] = readings
 
-            ean = extract_ean(detail, point)
+                archive = build_archive(readings)
+                archive_key = ean or uid
+                archive_paths = save_archive(archive, archive_dir, archive_key)
+                archive.update(archive_paths)
+                archives_by_uid[uid] = archive
+
+                _LOGGER.debug(
+                    "ČEZ archive saved for uid=%s ean=%s readings=%s periods=%s",
+                    uid,
+                    ean,
+                    archive.get("readings_count"),
+                    archive.get("periods_count"),
+                )
+
+            except Exception as err:
+                _LOGGER.warning("Unable to fetch/archive readings for uid=%s: %s", uid, err)
+                readings_by_uid[uid] = []
+                archives_by_uid[uid] = build_archive([])
 
             if ean:
                 try:
@@ -157,4 +179,5 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "details_by_uid": details_by_uid,
             "readings_by_uid": readings_by_uid,
             "signals_by_uid": signals_by_uid,
+            "archives_by_uid": archives_by_uid,
         }
