@@ -72,17 +72,33 @@ class CezDistribuceClient:
             f"&client_id={self.client_id}"
         )
 
+    def _debug_response(self, label: str, response: requests.Response) -> None:
+        """Log safe response diagnostics."""
+        _LOGGER.debug(
+            "%s: status=%s url=%s content_type=%s history=%s",
+            label,
+            response.status_code,
+            response.url,
+            response.headers.get("content-type"),
+            [(item.status_code, item.url) for item in response.history],
+        )
+
     def login(self) -> None:
         """Login and refresh portal X-Request-Token."""
         _LOGGER.debug("Logging in to ČEZ Distribuce portal")
 
         response = self.session.get(self.login_url, timeout=TIMEOUT)
+        self._debug_response("CAS login page response", response)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
         execution_input = soup.find("input", {"name": "execution"})
 
         if not execution_input or not execution_input.get("value"):
+            _LOGGER.error(
+                "CAS login page did not contain execution token. body_start=%r",
+                response.text[:1000],
+            )
             raise CezDistribuceAuthError("CAS login form did not contain execution token")
 
         response = self.session.post(
@@ -96,13 +112,24 @@ class CezDistribuceClient:
             },
             timeout=TIMEOUT,
         )
+        self._debug_response("CAS login submit response", response)
         response.raise_for_status()
 
+        if "login" in response.url.lower() and "cas.cez.cz" in response.url.lower():
+            _LOGGER.error(
+                "CAS login submit ended on login page again. This usually means invalid credentials "
+                "or unsupported login flow. body_start=%r",
+                response.text[:1000],
+            )
+            raise CezDistribuceAuthError("CAS login did not leave login page")
+
         response = self.session.get(self.authorize_url, timeout=TIMEOUT)
+        self._debug_response("CAS authorize response", response)
         response.raise_for_status()
 
         self.refresh_api_token()
         self._logged_in = True
+        _LOGGER.debug("ČEZ Distribuce login completed successfully")
 
     def ensure_logged_in(self) -> None:
         """Ensure the session is logged in."""
@@ -113,21 +140,36 @@ class CezDistribuceClient:
         """Fetch and store X-Request-Token."""
         url = f"{self.base_url}/rest-auth-api?path=/token/get"
         response = self.session.get(url, timeout=TIMEOUT)
+        self._debug_response("ČEZ token response", response)
         response.raise_for_status()
 
-        token = response.json()
+        try:
+            token = response.json()
+        except ValueError as err:
+            _LOGGER.error(
+                "ČEZ token response is not JSON. status=%s content_type=%s body_start=%r",
+                response.status_code,
+                response.headers.get("content-type"),
+                response.text[:1000],
+            )
+            raise CezDistribuceAuthError("Unable to fetch JSON X-Request-Token") from err
 
         if not isinstance(token, str) or not token:
+            _LOGGER.error("Unexpected ČEZ token payload type=%s value=%r", type(token).__name__, token)
             raise CezDistribuceAuthError("Unable to fetch X-Request-Token")
 
         self.session.headers.update({"X-Request-Token": token})
+        _LOGGER.debug("ČEZ X-Request-Token loaded successfully")
 
     def _request_json(self, method: str, url: str, **kwargs: Any) -> Any:
         """Call portal JSON endpoint and unwrap ČEZ response envelope."""
         self.ensure_logged_in()
 
-        for _attempt in range(LOGIN_RETRIES):
+        for attempt in range(LOGIN_RETRIES):
+            _LOGGER.debug("ČEZ request attempt=%s method=%s url=%s", attempt + 1, method, url)
+
             response = self.session.request(method, url, timeout=TIMEOUT, **kwargs)
+            self._debug_response("ČEZ JSON response", response)
 
             if response.status_code == 401:
                 _LOGGER.debug("Portal returned HTTP 401, refreshing login")
@@ -136,7 +178,28 @@ class CezDistribuceClient:
                 continue
 
             response.raise_for_status()
-            payload = response.json()
+
+            content_type = response.headers.get("content-type", "")
+
+            try:
+                payload = response.json()
+            except ValueError as err:
+                _LOGGER.error(
+                    "ČEZ response is not JSON. url=%s status=%s content_type=%s body_start=%r",
+                    response.url,
+                    response.status_code,
+                    content_type,
+                    response.text[:1000],
+                )
+                raise CezDistribuceError(
+                    f"ČEZ portal returned non-JSON response from {response.url}"
+                ) from err
+
+            _LOGGER.debug(
+                "ČEZ JSON payload received. type=%s keys=%s",
+                type(payload).__name__,
+                list(payload.keys()) if isinstance(payload, dict) else None,
+            )
 
             if isinstance(payload, dict):
                 status_code = payload.get("statusCode")
@@ -147,6 +210,7 @@ class CezDistribuceClient:
                     continue
 
                 if status_code not in (None, 200):
+                    _LOGGER.error("ČEZ portal returned error payload=%r", payload)
                     raise CezDistribuceError(
                         f"ČEZ portal returned statusCode={status_code}: {payload}"
                     )
@@ -212,5 +276,6 @@ class CezDistribuceClient:
         )
 
         response = self.session.get(url, timeout=TIMEOUT)
+        self._debug_response("ČEZ signals export response", response)
         response.raise_for_status()
         return response.content

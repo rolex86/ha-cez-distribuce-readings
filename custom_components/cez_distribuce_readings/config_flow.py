@@ -39,13 +39,28 @@ class CezDistribuceReadingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             username = user_input[CONF_USERNAME]
             password = user_input[CONF_PASSWORD]
 
+            _LOGGER.debug("Starting ČEZ Distribuce config flow validation for username=%s", username)
+
             client = CezDistribuceClient(username=username, password=password)
 
             try:
+                _LOGGER.debug("Validating ČEZ login")
                 await self.hass.async_add_executor_job(client.login)
-                await self.hass.async_add_executor_job(client.get_supply_points)
+
+                _LOGGER.debug("Validating ČEZ supply points loading")
+                supply_points = await self.hass.async_add_executor_job(client.get_supply_points)
+
+                _LOGGER.debug(
+                    "ČEZ supply points validation response type=%s",
+                    type(supply_points).__name__,
+                )
+
             except Exception as err:
-                _LOGGER.exception("ČEZ Distribuce login validation failed: %s", err)
+                _LOGGER.exception(
+                    "ČEZ Distribuce setup failed. Error type=%s, error=%s",
+                    type(err).__name__,
+                    err,
+                )
                 errors["base"] = "cannot_connect"
             else:
                 await self.async_set_unique_id(username)
