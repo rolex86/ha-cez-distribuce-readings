@@ -39,11 +39,24 @@
       },
       "last_period_total": {
         "name": "Spotřeba poslední období celkem"
-      }
-    },
-    "binary_sensor": {
-      "low_tariff_active": {
-        "name": "Nízký tarif aktivní"
+      },
+      "last_period_days": {
+        "name": "Počet dní posledního období"
+      },
+      "last_period_avg_daily": {
+        "name": "Průměrná denní spotřeba"
+      },
+      "last_period_nt_share": {
+        "name": "Podíl NT poslední období"
+      },
+      "last_period_vt_share": {
+        "name": "Podíl VT poslední období"
+      },
+      "archive_readings_count": {
+        "name": "Počet archivovaných odečtů"
+      },
+      "archive_periods_count": {
+        "name": "Počet vypočtených období"
       }
     }
   }

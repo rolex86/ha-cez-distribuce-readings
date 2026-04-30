@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy
+from homeassistant.const import PERCENTAGE, UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -78,6 +78,46 @@ SENSORS: tuple[CezSensorDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    ),
+    CezSensorDescription(
+        key="last_period_days",
+        translation_key="last_period_days",
+        kind="last_period_days",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="d",
+    ),
+    CezSensorDescription(
+        key="last_period_avg_daily",
+        translation_key="last_period_avg_daily",
+        kind="last_period_avg_daily",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="kWh/d",
+    ),
+    CezSensorDescription(
+        key="last_period_nt_share",
+        translation_key="last_period_nt_share",
+        kind="last_period_nt_share",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+    ),
+    CezSensorDescription(
+        key="last_period_vt_share",
+        translation_key="last_period_vt_share",
+        kind="last_period_vt_share",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+    ),
+    CezSensorDescription(
+        key="archive_readings_count",
+        translation_key="archive_readings_count",
+        kind="archive_readings_count",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    CezSensorDescription(
+        key="archive_periods_count",
+        translation_key="archive_periods_count",
+        kind="archive_periods_count",
+        state_class=SensorStateClass.MEASUREMENT,
     ),
 )
 
@@ -215,16 +255,57 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
             "model": "Elektroměr",
         }
 
+    def _archive(self) -> dict[str, Any]:
+        """Return normalized archive for this supply point."""
+        return self.coordinator.data.get("archives_by_uid", {}).get(self._uid, {})
+
+    def _latest_period(self) -> dict[str, Any] | None:
+        """Return latest calculated period."""
+        latest_period = self._archive().get("latest_period")
+        return latest_period if isinstance(latest_period, dict) else None
+
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> float | int | None:
         """Return sensor state."""
         readings = self.coordinator.data.get("readings_by_uid", {}).get(self._uid, [])
         latest = _latest_reading(readings)
 
+        kind = self.entity_description.kind
+
+        if kind in (
+            "last_period_days",
+            "last_period_avg_daily",
+            "last_period_nt_share",
+            "last_period_vt_share",
+            "archive_readings_count",
+            "archive_periods_count",
+        ):
+            archive = self._archive()
+            latest_period = self._latest_period()
+
+            if kind == "archive_readings_count":
+                return archive.get("readings_count")
+
+            if kind == "archive_periods_count":
+                return archive.get("periods_count")
+
+            if latest_period is None:
+                return None
+
+            if kind == "last_period_days":
+                return latest_period.get("days")
+
+            if kind == "last_period_avg_daily":
+                return latest_period.get("avg_kwh_day")
+
+            if kind == "last_period_nt_share":
+                return latest_period.get("nt_share_percent")
+
+            if kind == "last_period_vt_share":
+                return latest_period.get("vt_share_percent")
+
         if latest is None:
             return None
-
-        kind = self.entity_description.kind
 
         if kind == "state_vt":
             return _round_decimal(_vt(latest))
@@ -258,35 +339,53 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
         """Return attributes."""
         readings = self.coordinator.data.get("readings_by_uid", {}).get(self._uid, [])
         latest = _latest_reading(readings)
-
-        if latest is None:
-            return {
-                "uid": self._uid,
-                "ean": self._ean,
-            }
-
-        previous = _previous_same_meter(readings, latest)
+        archive = self._archive()
+        latest_period = self._latest_period()
 
         attrs: dict[str, Any] = {
             "uid": self._uid,
             "ean": self._ean,
-            "meter_serial": latest.get("sernr"),
-            "last_reading_date": latest.get("datumOdectu"),
-            "last_reading_time": latest.get("casOdectu"),
-            "last_reading_reason": latest.get("duvodOdectuText"),
-            "last_reading_source": latest.get("istablartText"),
-            "last_reading_status": latest.get("statusText"),
-            "vt_unit": latest.get("vtUnitRead"),
-            "nt_unit": latest.get("ntUnitRead"),
         }
 
-        if previous is not None:
+        if latest is not None:
+            previous = _previous_same_meter(readings, latest)
+
             attrs.update(
                 {
-                    "previous_reading_date": previous.get("datumOdectu"),
-                    "previous_reading_time": previous.get("casOdectu"),
-                    "previous_meter_serial": previous.get("sernr"),
+                    "meter_serial": latest.get("sernr"),
+                    "last_reading_date": latest.get("datumOdectu"),
+                    "last_reading_time": latest.get("casOdectu"),
+                    "last_reading_reason": latest.get("duvodOdectuText"),
+                    "last_reading_source": latest.get("istablartText"),
+                    "last_reading_status": latest.get("statusText"),
+                    "vt_unit": latest.get("vtUnitRead"),
+                    "nt_unit": latest.get("ntUnitRead"),
                 }
             )
+
+            if previous is not None:
+                attrs.update(
+                    {
+                        "previous_reading_date": previous.get("datumOdectu"),
+                        "previous_reading_time": previous.get("casOdectu"),
+                        "previous_meter_serial": previous.get("sernr"),
+                    }
+                )
+
+        if latest_period is not None:
+            attrs["latest_period"] = latest_period
+
+        kind = self.entity_description.kind
+
+        if kind in ("archive_readings_count", "archive_periods_count"):
+            periods = archive.get("periods", [])
+            if isinstance(periods, list):
+                attrs["last_12_periods"] = list(reversed(periods[-12:]))
+
+            if archive.get("json_path"):
+                attrs["json_path"] = archive.get("json_path")
+
+            if archive.get("csv_path"):
+                attrs["csv_path"] = archive.get("csv_path")
 
         return attrs
