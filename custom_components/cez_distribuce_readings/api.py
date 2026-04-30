@@ -44,7 +44,7 @@ class CezDistribuceClient:
     ) -> None:
         self.username = username
         self.password = password
-        self.base_url = base_url
+        self.base_url = base_url.rstrip("/")
         self.client_id = client_id
 
         self.session = requests.Session()
@@ -83,6 +83,40 @@ class CezDistribuceClient:
             [(item.status_code, item.url) for item in response.history],
         )
 
+    def _is_expected_oauth_redirect_404(self, response: requests.Response) -> bool:
+        """Return true when CAS ended on the expected portal callback URL.
+
+        ČEZ CAS can redirect to:
+        https://dip.cezdistribuce.cz/irj/portal?code=...
+
+        In a browser this continues inside the portal. In requests, the final
+        portal callback can end as HTTP 404 while the session cookies were still
+        issued correctly. For this specific URL shape, the 404 is not fatal.
+        """
+        if response.status_code != 404:
+            return False
+
+        parsed = urllib.parse.urlparse(response.url)
+        query = urllib.parse.parse_qs(parsed.query)
+
+        return response.url.startswith(self.base_url) and "code" in query
+
+    def _raise_unless_expected_oauth_redirect(
+        self,
+        label: str,
+        response: requests.Response,
+    ) -> None:
+        """Raise for status, except for the expected final OAuth callback 404."""
+        if self._is_expected_oauth_redirect_404(response):
+            _LOGGER.debug(
+                "%s ended with expected OAuth redirect 404. url=%s",
+                label,
+                response.url,
+            )
+            return
+
+        response.raise_for_status()
+
     def login(self) -> None:
         """Login and refresh portal X-Request-Token."""
         _LOGGER.debug("Logging in to ČEZ Distribuce portal")
@@ -113,7 +147,20 @@ class CezDistribuceClient:
             timeout=TIMEOUT,
         )
         self._debug_response("CAS login submit response", response)
-        response.raise_for_status()
+
+        if response.status_code in (400, 401, 403):
+            _LOGGER.error(
+                "CAS login submit failed. status=%s url=%s content_type=%s body_start=%r",
+                response.status_code,
+                response.url,
+                response.headers.get("content-type"),
+                response.text[:1500],
+            )
+            raise CezDistribuceAuthError(
+                f"CAS login submit failed with HTTP {response.status_code}"
+            )
+
+        self._raise_unless_expected_oauth_redirect("CAS login submit response", response)
 
         if "login" in response.url.lower() and "cas.cez.cz" in response.url.lower():
             _LOGGER.error(
@@ -125,7 +172,7 @@ class CezDistribuceClient:
 
         response = self.session.get(self.authorize_url, timeout=TIMEOUT)
         self._debug_response("CAS authorize response", response)
-        response.raise_for_status()
+        self._raise_unless_expected_oauth_redirect("CAS authorize response", response)
 
         self.refresh_api_token()
         self._logged_in = True
@@ -155,7 +202,11 @@ class CezDistribuceClient:
             raise CezDistribuceAuthError("Unable to fetch JSON X-Request-Token") from err
 
         if not isinstance(token, str) or not token:
-            _LOGGER.error("Unexpected ČEZ token payload type=%s value=%r", type(token).__name__, token)
+            _LOGGER.error(
+                "Unexpected ČEZ token payload type=%s value=%r",
+                type(token).__name__,
+                token,
+            )
             raise CezDistribuceAuthError("Unable to fetch X-Request-Token")
 
         self.session.headers.update({"X-Request-Token": token})
@@ -166,7 +217,12 @@ class CezDistribuceClient:
         self.ensure_logged_in()
 
         for attempt in range(LOGIN_RETRIES):
-            _LOGGER.debug("ČEZ request attempt=%s method=%s url=%s", attempt + 1, method, url)
+            _LOGGER.debug(
+                "ČEZ request attempt=%s method=%s url=%s",
+                attempt + 1,
+                method,
+                url,
+            )
 
             response = self.session.request(method, url, timeout=TIMEOUT, **kwargs)
             self._debug_response("ČEZ JSON response", response)
