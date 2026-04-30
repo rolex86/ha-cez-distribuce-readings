@@ -357,6 +357,29 @@ def _build_signal_plans(data: Any) -> list[SignalPlan]:
         reverse=True,
     )
 
+    # ČEZ can return multiple signal IDs with the exact same schedule.
+    # Example:
+    # - signal |2: 20h low tariff
+    # - signal |1: same 20h schedule
+    # - signal |3: 8h controlled load / boiler schedule
+    #
+    # For Home Assistant entities we only want unique schedules, otherwise we
+    # create duplicate binary sensors that show the same thing.
+    unique_raw_plans: list[tuple[str, list[tuple[datetime, datetime]], float | None]] = []
+    seen_interval_signatures: set[tuple[tuple[str, str], ...]] = set()
+
+    for signal_id, intervals, average_hours in raw_plans:
+        signature = tuple(
+            (start.isoformat(), end.isoformat())
+            for start, end in intervals
+        )
+
+        if signature in seen_interval_signatures:
+            continue
+
+        seen_interval_signatures.add(signature)
+        unique_raw_plans.append((signal_id, intervals, average_hours))
+
     return [
         SignalPlan(
             signal_id=signal_id,
@@ -365,7 +388,7 @@ def _build_signal_plans(data: Any) -> list[SignalPlan]:
             intervals=tuple(intervals),
             average_daily_hours=average_hours,
         )
-        for index, (signal_id, intervals, average_hours) in enumerate(raw_plans)
+        for index, (signal_id, intervals, average_hours) in enumerate(unique_raw_plans)
     ]
 
 
