@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -23,6 +24,17 @@ TIME_RANGE_RE = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class SignalPlan:
+    """Parsed ČEZ HDO/signal plan."""
+
+    signal_id: str
+    rank: int
+    is_low_tariff: bool
+    intervals: tuple[tuple[datetime, datetime], ...]
+    average_daily_hours: float | None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -31,7 +43,7 @@ async def async_setup_entry(
     """Set up binary sensors."""
     coordinator: CezDistribuceCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities: list[CezLowTariffBinarySensor] = []
+    entities: list[CezSignalBinarySensor] = []
 
     for point in coordinator.data.get("points", []):
         uid = point.get("uid")
@@ -40,14 +52,35 @@ async def async_setup_entry(
 
         detail = coordinator.data.get("details_by_uid", {}).get(uid, {})
         ean = extract_ean(detail, point)
+        signals = coordinator.data.get("signals_by_uid", {}).get(uid)
+        plans = _build_signal_plans(signals)
 
-        entities.append(
-            CezLowTariffBinarySensor(
-                coordinator=coordinator,
-                uid=uid,
-                ean=ean,
+        if plans:
+            for plan in plans:
+                entities.append(
+                    CezSignalBinarySensor(
+                        coordinator=coordinator,
+                        uid=uid,
+                        ean=ean,
+                        signal_id=plan.signal_id,
+                        rank=plan.rank,
+                        is_low_tariff=plan.is_low_tariff,
+                    )
+                )
+        else:
+            # Keep the original low tariff entity available even when ČEZ returns
+            # no parsable HDO/signals yet. It will show as unknown with helpful
+            # attributes instead of disappearing.
+            entities.append(
+                CezSignalBinarySensor(
+                    coordinator=coordinator,
+                    uid=uid,
+                    ean=ean,
+                    signal_id=None,
+                    rank=1,
+                    is_low_tariff=True,
+                )
             )
-        )
 
     async_add_entities(entities)
 
@@ -81,30 +114,6 @@ def _parse_date(value: Any) -> date | None:
         return datetime.strptime(text, "%d.%m.%Y").date()
     except ValueError:
         return None
-
-
-def _parse_time(value: Any) -> time | None:
-    """Parse time in HHMM or HH:MM format.
-
-    This helper is for ordinary times only. 24:00 is handled by
-    _datetime_from_hm because Python's time type does not allow hour 24.
-    """
-    if value is None:
-        return None
-
-    parsed = _parse_hm(value)
-    if parsed is None:
-        return None
-
-    hour, minute = parsed
-
-    if hour == 24 and minute == 0:
-        return time(0, 0)
-
-    if hour > 23 or minute > 59:
-        return None
-
-    return time(hour, minute)
 
 
 def _parse_hm(value: Any) -> tuple[int, int] | None:
@@ -227,14 +236,7 @@ def _parse_direct_interval(day: date, item: dict[str, Any]) -> list[tuple[dateti
 
 
 def _extract_intervals(data: Any, inherited_day: date | None = None) -> list[tuple[datetime, datetime]]:
-    """Extract signal intervals from a ČEZ response.
-
-    Accepted shapes include:
-    - {"signals": [{"datum": "30.04.2026", "casy": "00:00-00:45; ..."}]}
-    - envelope-unwrapped data from {"data": {"signals": [...]}}
-    - nested lists/dicts with date + intervals
-    - string ranges like 01:00-05:00 or 0100-0500
-    """
+    """Extract signal intervals from a ČEZ response or a single signal item."""
     intervals: list[tuple[datetime, datetime]] = []
 
     if isinstance(data, list):
@@ -284,8 +286,101 @@ def _dedupe_intervals(
     return sorted(result, key=lambda row: row[0])
 
 
+def _signal_items(data: Any) -> list[dict[str, Any]]:
+    """Return ČEZ signal item dictionaries from endpoint data."""
+    if isinstance(data, dict) and isinstance(data.get("signals"), list):
+        return [item for item in data["signals"] if isinstance(item, dict)]
+
+    return []
+
+
+def _average_daily_hours(intervals: list[tuple[datetime, datetime]]) -> float | None:
+    """Return average duration per loaded day."""
+    if not intervals:
+        return None
+
+    seconds_by_day: dict[date, float] = {}
+
+    for start, end in intervals:
+        seconds_by_day[start.date()] = seconds_by_day.get(start.date(), 0.0) + (
+            end - start
+        ).total_seconds()
+
+    if not seconds_by_day:
+        return None
+
+    return round(sum(seconds_by_day.values()) / len(seconds_by_day) / 3600, 2)
+
+
+def _build_signal_plans(data: Any) -> list[SignalPlan]:
+    """Build separate signal plans from ČEZ HDO response.
+
+    The endpoint can return multiple signal channels for one supply point. For
+    example, one channel can represent the real low tariff schedule and another
+    channel can represent a boiler/controlled-load permission schedule. Mixing
+    all channels would incorrectly make the low-tariff binary sensor active for
+    more time than it should be.
+    """
+    items = _signal_items(data)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+
+    if items:
+        for item in items:
+            signal_id = str(item.get("signal") or "unknown")
+            grouped.setdefault(signal_id, []).append(item)
+    else:
+        fallback_intervals = _extract_intervals(data)
+        if not fallback_intervals:
+            return []
+        grouped["default"] = []
+
+    raw_plans: list[tuple[str, list[tuple[datetime, datetime]], float | None]] = []
+
+    if grouped == {"default": []}:
+        intervals = _extract_intervals(data)
+        raw_plans.append(("default", intervals, _average_daily_hours(intervals)))
+    else:
+        for signal_id, signal_items_for_id in grouped.items():
+            intervals: list[tuple[datetime, datetime]] = []
+            for item in signal_items_for_id:
+                intervals.extend(_extract_intervals(item))
+            intervals = _dedupe_intervals(intervals)
+            raw_plans.append((signal_id, intervals, _average_daily_hours(intervals)))
+
+    raw_plans = [row for row in raw_plans if row[1]]
+    raw_plans.sort(
+        key=lambda row: (
+            row[2] if row[2] is not None else 0,
+            len(row[1]),
+            row[0],
+        ),
+        reverse=True,
+    )
+
+    return [
+        SignalPlan(
+            signal_id=signal_id,
+            rank=index + 1,
+            is_low_tariff=index == 0,
+            intervals=tuple(intervals),
+            average_daily_hours=average_hours,
+        )
+        for index, (signal_id, intervals, average_hours) in enumerate(raw_plans)
+    ]
+
+
+def _signal_key(signal_id: str | None, rank: int, is_low_tariff: bool) -> str:
+    """Return stable unique key suffix for a signal plan."""
+    if is_low_tariff:
+        return "low_tariff_active"
+
+    source = signal_id or f"signal_{rank}"
+    slug = re.sub(r"[^a-zA-Z0-9_]+", "_", source).strip("_").lower()
+    return f"hdo_signal_{rank}_{slug[:80]}_active"
+
+
 def _active_interval(
-    intervals: list[tuple[datetime, datetime]],
+    intervals: list[tuple[datetime, datetime]] | tuple[tuple[datetime, datetime], ...],
     now: datetime,
 ) -> tuple[datetime, datetime] | None:
     """Return current active interval."""
@@ -297,7 +392,7 @@ def _active_interval(
 
 
 def _next_interval(
-    intervals: list[tuple[datetime, datetime]],
+    intervals: list[tuple[datetime, datetime]] | tuple[tuple[datetime, datetime], ...],
     now: datetime,
 ) -> tuple[datetime, datetime] | None:
     """Return next future interval."""
@@ -308,27 +403,51 @@ def _next_interval(
     return None
 
 
-class CezLowTariffBinarySensor(
+def _duration_hours_for_day(
+    intervals: tuple[tuple[datetime, datetime], ...],
+    target_day: date,
+) -> float:
+    """Return total interval duration for a given date based on interval start."""
+    seconds = sum(
+        (end - start).total_seconds()
+        for start, end in intervals
+        if start.date() == target_day
+    )
+    return round(seconds / 3600, 2)
+
+
+class CezSignalBinarySensor(
     CoordinatorEntity[CezDistribuceCoordinator],
     BinarySensorEntity,
 ):
-    """Binary sensor for low tariff / HDO active state."""
+    """Binary sensor for one ČEZ low-tariff/HDO signal plan."""
 
     _attr_has_entity_name = True
-    _attr_translation_key = "low_tariff_active"
 
     def __init__(
         self,
         coordinator: CezDistribuceCoordinator,
         uid: str,
         ean: str | None,
+        signal_id: str | None,
+        rank: int,
+        is_low_tariff: bool,
     ) -> None:
         super().__init__(coordinator)
         self._uid = uid
         self._ean = ean
+        self._signal_id = signal_id
+        self._rank = rank
+        self._is_low_tariff = is_low_tariff
 
         base_id = ean or uid
-        self._attr_unique_id = f"{DOMAIN}_{base_id}_low_tariff_active"
+        signal_key = _signal_key(signal_id, rank, is_low_tariff)
+        self._attr_unique_id = f"{DOMAIN}_{base_id}_{signal_key}"
+
+        if is_low_tariff:
+            self._attr_name = "Nízký tarif aktivní"
+        else:
+            self._attr_name = f"HDO signál {rank} aktivní"
 
     async def async_added_to_hass(self) -> None:
         """Register minute-based state refresh."""
@@ -359,52 +478,100 @@ class CezLowTariffBinarySensor(
             "model": "Elektroměr",
         }
 
-    def _intervals(self) -> list[tuple[datetime, datetime]]:
-        """Return parsed intervals for this supply point."""
+    def _all_plans(self) -> list[SignalPlan]:
+        """Return all parsed signal plans for this supply point."""
         signals = self.coordinator.data.get("signals_by_uid", {}).get(self._uid)
-        return _extract_intervals(signals)
+        return _build_signal_plans(signals)
+
+    def _plan(self) -> SignalPlan | None:
+        """Return this entity's current signal plan."""
+        plans = self._all_plans()
+
+        if self._is_low_tariff:
+            for plan in plans:
+                if plan.is_low_tariff:
+                    return plan
+            return None
+
+        for plan in plans:
+            if plan.rank == self._rank and plan.signal_id == self._signal_id:
+                return plan
+
+        for plan in plans:
+            if plan.rank == self._rank:
+                return plan
+
+        return None
 
     @property
     def is_on(self) -> bool | None:
-        """Return true if low tariff is active now."""
-        intervals = self._intervals()
+        """Return true if this ČEZ signal is active now."""
+        plan = self._plan()
 
-        if not intervals:
+        if plan is None or not plan.intervals:
             return None
 
         now = dt_util.now()
-        return _active_interval(intervals, now) is not None
+        return _active_interval(plan.intervals, now) is not None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return attributes."""
-        intervals = self._intervals()
+        plan = self._plan()
+        all_plans = self._all_plans()
         now = dt_util.now()
-
-        active = _active_interval(intervals, now)
-        next_item = _next_interval(intervals, now)
-
         today = now.date()
         tomorrow = today + timedelta(days=1)
-
-        def format_interval(row: tuple[datetime, datetime]) -> str:
-            return f"{row[0].strftime('%H:%M')}-{row[1].strftime('%H:%M')}"
 
         attrs: dict[str, Any] = {
             "uid": self._uid,
             "ean": self._ean,
-            "intervals_loaded": len(intervals),
-            "today_intervals": [
-                format_interval(row)
-                for row in intervals
-                if row[0].date() == today
-            ],
-            "tomorrow_intervals": [
-                format_interval(row)
-                for row in intervals
-                if row[0].date() == tomorrow
-            ],
+            "signal_id": self._signal_id,
+            "signal_rank": self._rank,
+            "is_low_tariff_plan": self._is_low_tariff,
+            "available_signals": [plan.signal_id for plan in all_plans],
+            "available_signal_daily_hours": {
+                plan.signal_id: plan.average_daily_hours for plan in all_plans
+            },
         }
+
+        if plan is None:
+            attrs.update(
+                {
+                    "intervals_loaded": 0,
+                    "today_intervals": [],
+                    "tomorrow_intervals": [],
+                }
+            )
+            return attrs
+
+        active = _active_interval(plan.intervals, now)
+        next_item = _next_interval(plan.intervals, now)
+
+        def format_interval(row: tuple[datetime, datetime]) -> str:
+            return f"{row[0].strftime('%H:%M')}-{row[1].strftime('%H:%M')}"
+
+        attrs.update(
+            {
+                "signal_id": plan.signal_id,
+                "signal_rank": plan.rank,
+                "is_low_tariff_plan": plan.is_low_tariff,
+                "average_daily_hours": plan.average_daily_hours,
+                "intervals_loaded": len(plan.intervals),
+                "today_duration_hours": _duration_hours_for_day(plan.intervals, today),
+                "tomorrow_duration_hours": _duration_hours_for_day(plan.intervals, tomorrow),
+                "today_intervals": [
+                    format_interval(row)
+                    for row in plan.intervals
+                    if row[0].date() == today
+                ],
+                "tomorrow_intervals": [
+                    format_interval(row)
+                    for row in plan.intervals
+                    if row[0].date() == tomorrow
+                ],
+            }
+        )
 
         if active:
             attrs["current_interval_start"] = active[0].isoformat()
