@@ -357,28 +357,38 @@ def _build_signal_plans(data: Any) -> list[SignalPlan]:
         reverse=True,
     )
 
-    # ČEZ can return multiple signal IDs with the exact same schedule.
-    # Example:
-    # - signal |2: 20h low tariff
-    # - signal |1: same 20h schedule
-    # - signal |3: 8h controlled load / boiler schedule
-    #
-    # For Home Assistant entities we only want unique schedules, otherwise we
-    # create duplicate binary sensors that show the same thing.
-    unique_raw_plans: list[tuple[str, list[tuple[datetime, datetime]], float | None]] = []
-    seen_interval_signatures: set[tuple[tuple[str, str], ...]] = set()
+    if not raw_plans:
+        return []
 
-    for signal_id, intervals, average_hours in raw_plans:
-        signature = tuple(
-            (start.isoformat(), end.isoformat())
-            for start, end in intervals
-        )
+    # ČEZ can return multiple 20h signal IDs for the same low-tariff window.
+    # In your case, |2 and |1 are both 20h plans, while |3 is the shorter
+    # controlled-load/boiler plan. For HA we want:
+    # - one low-tariff entity = longest plan
+    # - extra HDO entities only for clearly shorter plans
+    low_tariff_average_hours = raw_plans[0][2] or 0
+    selected_raw_plans: list[tuple[str, list[tuple[datetime, datetime]], float | None]] = [
+        raw_plans[0]
+    ]
+    seen_interval_signatures: set[tuple[tuple[str, str], ...]] = {
+        tuple((start.isoformat(), end.isoformat()) for start, end in raw_plans[0][1])
+    }
+
+    for signal_id, intervals, average_hours in raw_plans[1:]:
+        signature = tuple((start.isoformat(), end.isoformat()) for start, end in intervals)
 
         if signature in seen_interval_signatures:
             continue
 
         seen_interval_signatures.add(signature)
-        unique_raw_plans.append((signal_id, intervals, average_hours))
+
+        # Ignore additional plans that are effectively the same daily duration as
+        # the low-tariff plan. They are duplicate tariff channels, not separate
+        # controlled-load schedules.
+        if average_hours is not None and low_tariff_average_hours:
+            if average_hours >= low_tariff_average_hours - 1:
+                continue
+
+        selected_raw_plans.append((signal_id, intervals, average_hours))
 
     return [
         SignalPlan(
@@ -388,7 +398,7 @@ def _build_signal_plans(data: Any) -> list[SignalPlan]:
             intervals=tuple(intervals),
             average_daily_hours=average_hours,
         )
-        for index, (signal_id, intervals, average_hours) in enumerate(unique_raw_plans)
+        for index, (signal_id, intervals, average_hours) in enumerate(selected_raw_plans)
     ]
 
 
