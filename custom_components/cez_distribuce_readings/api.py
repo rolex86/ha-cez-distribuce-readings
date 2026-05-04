@@ -176,6 +176,12 @@ class CezDistribuceClient:
 
         return form_action, payload
 
+    def _reset_session(self) -> None:
+        """Drop portal cookies and request token before a forced relogin."""
+        self.session.cookies.clear()
+        self.session.headers.pop("X-Request-Token", None)
+        self._logged_in = False
+
     def login(self) -> None:
         """Login and refresh portal X-Request-Token."""
         _LOGGER.debug("Logging in to ČEZ Distribuce portal")
@@ -227,6 +233,12 @@ class CezDistribuceClient:
         self._logged_in = True
         _LOGGER.debug("ČEZ Distribuce login completed successfully")
 
+    def force_login(self) -> None:
+        """Force a clean login after the portal returned an expired-session page."""
+        _LOGGER.debug("Forcing fresh ČEZ Distribuce login")
+        self._reset_session()
+        self.login()
+
     def ensure_logged_in(self) -> None:
         """Ensure the session is logged in."""
         if not self._logged_in:
@@ -266,6 +278,53 @@ class CezDistribuceClient:
 
         return None
 
+    def _looks_like_html(self, response: requests.Response) -> bool:
+        """Return true when the portal returned HTML instead of JSON.
+
+        This usually means the ČEZ portal session expired and the request was
+        redirected to a portal shell/login-like HTML page, even with HTTP 200.
+        """
+        content_type = (response.headers.get("content-type") or "").lower()
+
+        if "text/html" in content_type or "application/xhtml" in content_type:
+            return True
+
+        text_start = response.text[:500].lstrip().lower()
+        return text_start.startswith("<!doctype html") or text_start.startswith("<html")
+
+    def _json_or_auth_error(
+        self,
+        response: requests.Response,
+        label: str,
+    ) -> Any:
+        """Decode JSON or raise an auth error when HTML was returned."""
+        if self._looks_like_html(response):
+            _LOGGER.warning(
+                "%s returned HTML instead of JSON. Treating it as expired ČEZ session. "
+                "status=%s url=%s content_type=%s body_start=%r",
+                label,
+                response.status_code,
+                response.url,
+                response.headers.get("content-type"),
+                response.text[:1000],
+            )
+            raise CezDistribuceAuthError("ČEZ portal returned HTML instead of JSON")
+
+        try:
+            return response.json()
+        except ValueError as err:
+            _LOGGER.error(
+                "%s is not JSON. status=%s url=%s content_type=%s body_start=%r",
+                label,
+                response.status_code,
+                response.url,
+                response.headers.get("content-type"),
+                response.text[:1000],
+            )
+            raise CezDistribuceError(
+                f"ČEZ portal returned non-JSON response from {response.url}"
+            ) from err
+
     def refresh_api_token(self) -> None:
         """Fetch and store X-Request-Token."""
         url = f"{self.base_url}/rest-auth-api?path=/token/get"
@@ -273,17 +332,7 @@ class CezDistribuceClient:
         self._debug_response("ČEZ token response", response)
         response.raise_for_status()
 
-        try:
-            payload = response.json()
-        except ValueError as err:
-            _LOGGER.error(
-                "ČEZ token response is not JSON. status=%s content_type=%s body_start=%r",
-                response.status_code,
-                response.headers.get("content-type"),
-                response.text[:1000],
-            )
-            raise CezDistribuceAuthError("Unable to fetch JSON X-Request-Token") from err
-
+        payload = self._json_or_auth_error(response, "ČEZ token response")
         token = self._extract_token_from_payload(payload)
 
         if not token:
@@ -301,6 +350,8 @@ class CezDistribuceClient:
         """Call portal JSON endpoint and unwrap ČEZ response envelope."""
         self.ensure_logged_in()
 
+        last_error: Exception | None = None
+
         for attempt in range(LOGIN_RETRIES):
             _LOGGER.debug(
                 "ČEZ request attempt=%s method=%s url=%s",
@@ -312,29 +363,28 @@ class CezDistribuceClient:
             response = self.session.request(method, url, timeout=TIMEOUT, **kwargs)
             self._debug_response("ČEZ JSON response", response)
 
-            if response.status_code == 401:
-                _LOGGER.debug("Portal returned HTTP 401, refreshing login")
-                self._logged_in = False
-                self.login()
+            if response.status_code in (401, 403):
+                _LOGGER.debug(
+                    "Portal returned HTTP %s, forcing fresh login",
+                    response.status_code,
+                )
+                self.force_login()
                 continue
 
             response.raise_for_status()
 
-            content_type = response.headers.get("content-type", "")
-
             try:
-                payload = response.json()
-            except ValueError as err:
-                _LOGGER.error(
-                    "ČEZ response is not JSON. url=%s status=%s content_type=%s body_start=%r",
-                    response.url,
-                    response.status_code,
-                    content_type,
-                    response.text[:1000],
+                payload = self._json_or_auth_error(response, "ČEZ JSON response")
+            except CezDistribuceAuthError as err:
+                last_error = err
+                if attempt + 1 >= LOGIN_RETRIES:
+                    break
+
+                _LOGGER.debug(
+                    "ČEZ returned non-JSON/HTML response, forcing relogin and retry"
                 )
-                raise CezDistribuceError(
-                    f"ČEZ portal returned non-JSON response from {response.url}"
-                ) from err
+                self.force_login()
+                continue
 
             _LOGGER.debug(
                 "ČEZ JSON payload received. type=%s keys=%s",
@@ -345,9 +395,12 @@ class CezDistribuceClient:
             if isinstance(payload, dict):
                 status_code = payload.get("statusCode")
 
-                if status_code == 401:
-                    _LOGGER.debug("Portal returned JSON statusCode 401, refreshing token")
-                    self.refresh_api_token()
+                if status_code in (401, 403):
+                    _LOGGER.debug(
+                        "Portal returned JSON statusCode %s, forcing fresh login",
+                        status_code,
+                    )
+                    self.force_login()
                     continue
 
                 if status_code not in (None, 200):
@@ -360,6 +413,11 @@ class CezDistribuceClient:
                     return payload["data"]
 
             return payload
+
+        if last_error is not None:
+            raise CezDistribuceAuthError(
+                "Unable to complete authenticated portal request after relogin"
+            ) from last_error
 
         raise CezDistribuceAuthError("Unable to complete authenticated portal request")
 
