@@ -201,7 +201,7 @@ class CezDistribuceOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
+        self._config_entry = config_entry
 
     async def async_step_init(
         self,
@@ -211,13 +211,13 @@ class CezDistribuceOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current_scan_interval = self.config_entry.options.get(
+        current_scan_interval = self._config_entry.options.get(
             CONF_SCAN_INTERVAL,
-            self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_MIN),
+            self._config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_MIN),
         )
-        current_detailed_history = self.config_entry.options.get(
+        current_detailed_history = self._config_entry.options.get(
             CONF_DETAILED_HISTORY,
-            self.config_entry.data.get(CONF_DETAILED_HISTORY, True),
+            self._config_entry.data.get(CONF_DETAILED_HISTORY, True),
         )
 
         data_schema = vol.Schema(
