@@ -26,8 +26,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
-    scan_interval_min = entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_MIN)
-    detailed_history = entry.data.get(CONF_DETAILED_HISTORY, True)
+    scan_interval_min = entry.options.get(
+        CONF_SCAN_INTERVAL,
+        entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_MIN),
+    )
+    detailed_history = entry.options.get(
+        CONF_DETAILED_HISTORY,
+        entry.data.get(CONF_DETAILED_HISTORY, True),
+    )
 
     client = CezDistribuceClient(username=username, password=password)
 

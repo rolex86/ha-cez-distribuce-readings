@@ -14,10 +14,25 @@
       }
     },
     "error": {
-      "cannot_connect": "Nepodařilo se přihlásit nebo načíst data z portálu ČEZ Distribuce."
+      "cannot_connect": "Nepodařilo se připojit k portálu ČEZ Distribuce.",
+      "invalid_auth": "Neplatné přihlašovací údaje nebo neúspěšné přihlášení.",
+      "timeout": "Portál ČEZ Distribuce neodpověděl včas.",
+      "unknown": "Nastala neočekávaná chyba."
     },
     "abort": {
       "already_configured": "Tento účet už je nakonfigurovaný."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Nastavení ČEZ Distribuce Readings",
+        "description": "Uprav parametry průběžné synchronizace.",
+        "data": {
+          "scan_interval": "Interval aktualizace",
+          "detailed_history": "Použít detailní historii odečtů"
+        }
+      }
     }
   },
   "entity": {
