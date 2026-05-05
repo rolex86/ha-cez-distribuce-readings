@@ -567,6 +567,7 @@ class CezSignalBinarySensor(
                 plan.signal_id: plan.average_daily_hours for plan in all_plans
             },
         }
+        attrs.update(self.coordinator.refresh_status_attributes())
 
         if plan is None:
             attrs.update(

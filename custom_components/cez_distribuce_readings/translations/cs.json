@@ -11,6 +11,13 @@
           "scan_interval": "Interval aktualizace",
           "detailed_history": "Použít detailní historii odečtů"
         }
+      },
+      "reauth_confirm": {
+        "title": "Obnovit přihlášení",
+        "description": "Účet vyžaduje nové přihlášení. Zadej aktuální heslo.",
+        "data": {
+          "password": "Heslo"
+        }
       }
     },
     "error": {
@@ -20,7 +27,8 @@
       "unknown": "Nastala neočekávaná chyba."
     },
     "abort": {
-      "already_configured": "Tento účet už je nakonfigurovaný."
+      "already_configured": "Tento účet už je nakonfigurovaný.",
+      "reauth_successful": "Přihlášení bylo úspěšně obnoveno."
     }
   },
   "options": {
@@ -72,6 +80,9 @@
       },
       "archive_periods_count": {
         "name": "Počet vypočtených období"
+      },
+      "refresh_health": {
+        "name": "Stav komunikace integrace"
       }
     }
   }

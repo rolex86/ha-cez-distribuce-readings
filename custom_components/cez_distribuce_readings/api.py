@@ -32,6 +32,14 @@ class CezDistribuceAuthError(CezDistribuceError):
     """Authentication error."""
 
 
+class CezDistribuceNetworkError(CezDistribuceError):
+    """Network or HTTP transport error."""
+
+
+class CezDistribuceUnexpectedResponseError(CezDistribuceError):
+    """Portal returned an unexpected response payload."""
+
+
 class CezDistribuceClient:
     """Synchronous client used from HA executor jobs."""
 
@@ -182,24 +190,41 @@ class CezDistribuceClient:
         self.session.headers.pop("X-Request-Token", None)
         self._logged_in = False
 
+    def _request_with_network_errors(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Execute HTTP request and map transport errors to integration exceptions."""
+        try:
+            return self.session.request(method, url, timeout=TIMEOUT, **kwargs)
+        except requests.Timeout as err:
+            raise CezDistribuceNetworkError(f"ČEZ request timed out for {url}") from err
+        except requests.RequestException as err:
+            raise CezDistribuceNetworkError(f"ČEZ request failed for {url}") from err
+
     def login(self) -> None:
         """Login and refresh portal X-Request-Token."""
         _LOGGER.debug("Logging in to ČEZ Distribuce portal")
 
-        response = self.session.get(self.login_url, timeout=TIMEOUT)
+        response = self._request_with_network_errors("GET", self.login_url)
         self._debug_response("CAS login page response", response)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.RequestException as err:
+            raise CezDistribuceNetworkError("Unable to load CAS login page") from err
 
         form_action, form_payload = self._login_form_payload(response.text)
 
-        response = self.session.post(
+        response = self._request_with_network_errors(
+            "POST",
             form_action,
             data=form_payload,
             headers={
                 "Origin": CAS_BASE_URL.replace("/cas", ""),
                 "Referer": self.login_url,
             },
-            timeout=TIMEOUT,
         )
         self._debug_response("CAS login submit response", response)
 
@@ -225,7 +250,7 @@ class CezDistribuceClient:
             )
             raise CezDistribuceAuthError("CAS login did not leave login page")
 
-        response = self.session.get(self.authorize_url, timeout=TIMEOUT)
+        response = self._request_with_network_errors("GET", self.authorize_url)
         self._debug_response("CAS authorize response", response)
         self._raise_unless_expected_oauth_redirect("CAS authorize response", response)
 
@@ -328,9 +353,12 @@ class CezDistribuceClient:
     def refresh_api_token(self) -> None:
         """Fetch and store X-Request-Token."""
         url = f"{self.base_url}/rest-auth-api?path=/token/get"
-        response = self.session.get(url, timeout=TIMEOUT)
+        response = self._request_with_network_errors("GET", url)
         self._debug_response("ČEZ token response", response)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.RequestException as err:
+            raise CezDistribuceNetworkError("Unable to fetch ČEZ API token") from err
 
         payload = self._json_or_auth_error(response, "ČEZ token response")
         token = self._extract_token_from_payload(payload)
@@ -360,7 +388,7 @@ class CezDistribuceClient:
                 url,
             )
 
-            response = self.session.request(method, url, timeout=TIMEOUT, **kwargs)
+            response = self._request_with_network_errors(method, url, **kwargs)
             self._debug_response("ČEZ JSON response", response)
 
             if response.status_code in (401, 403):
@@ -371,7 +399,12 @@ class CezDistribuceClient:
                 self.force_login()
                 continue
 
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.RequestException as err:
+                raise CezDistribuceNetworkError(
+                    f"ČEZ endpoint returned HTTP error for {url}"
+                ) from err
 
             try:
                 payload = self._json_or_auth_error(response, "ČEZ JSON response")
@@ -405,7 +438,7 @@ class CezDistribuceClient:
 
                 if status_code not in (None, 200):
                     _LOGGER.error("ČEZ portal returned error payload=%r", payload)
-                    raise CezDistribuceError(
+                    raise CezDistribuceUnexpectedResponseError(
                         f"ČEZ portal returned statusCode={status_code}: {payload}"
                     )
 
@@ -419,7 +452,9 @@ class CezDistribuceClient:
                 "Unable to complete authenticated portal request after relogin"
             ) from last_error
 
-        raise CezDistribuceAuthError("Unable to complete authenticated portal request")
+        raise CezDistribuceUnexpectedResponseError(
+            "Unable to complete authenticated portal request"
+        )
 
     def get_supply_points(self) -> Any:
         """Return supply points available to the logged-in user."""
@@ -454,7 +489,9 @@ class CezDistribuceClient:
         if isinstance(data, list):
             return data
 
-        return []
+        raise CezDistribuceUnexpectedResponseError(
+            f"Unexpected meter reading history payload type: {type(data).__name__}"
+        )
 
     def get_signals(self, ean: str) -> Any:
         """Return HDO / signal switching times for EAN."""
@@ -474,7 +511,10 @@ class CezDistribuceClient:
             f"?path=dashboard/supply-point/signals/export/{ean}"
         )
 
-        response = self.session.get(url, timeout=TIMEOUT)
+        response = self._request_with_network_errors("GET", url)
         self._debug_response("ČEZ signals export response", response)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.RequestException as err:
+            raise CezDistribuceNetworkError("Unable to download signals export") from err
         return response.content

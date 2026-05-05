@@ -119,6 +119,11 @@ SENSORS: tuple[CezSensorDescription, ...] = (
         kind="archive_periods_count",
         state_class=SensorStateClass.MEASUREMENT,
     ),
+    CezSensorDescription(
+        key="refresh_health",
+        translation_key="refresh_health",
+        kind="refresh_health",
+    ),
 )
 
 
@@ -265,12 +270,24 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
         return latest_period if isinstance(latest_period, dict) else None
 
     @property
-    def native_value(self) -> float | int | None:
+    def native_value(self) -> float | int | str | None:
         """Return sensor state."""
         readings = self.coordinator.data.get("readings_by_uid", {}).get(self._uid, [])
         latest = _latest_reading(readings)
+        refresh_status = self.coordinator.refresh_status_attributes()
+        error_type = refresh_status.get("refresh_error_type")
+        consecutive_failures = int(refresh_status.get("refresh_consecutive_failures") or 0)
 
         kind = self.entity_description.kind
+
+        if kind == "refresh_health":
+            if error_type in ("auth", "schema"):
+                return "error"
+            if error_type and consecutive_failures >= 3:
+                return "error"
+            if error_type:
+                return "warn"
+            return "ok" if self.coordinator.last_update_success else "warn"
 
         if kind in (
             "last_period_days",
@@ -346,6 +363,7 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
             "uid": self._uid,
             "ean": self._ean,
         }
+        attrs.update(self.coordinator.refresh_status_attributes())
 
         if latest is not None:
             previous = _previous_same_meter(readings, latest)

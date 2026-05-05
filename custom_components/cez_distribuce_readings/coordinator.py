@@ -10,11 +10,18 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import CezDistribuceClient, CezDistribuceError
+from .api import (
+    CezDistribuceAuthError,
+    CezDistribuceClient,
+    CezDistribuceError,
+    CezDistribuceNetworkError,
+    CezDistribuceUnexpectedResponseError,
+)
 from .archive import build_archive, save_archive
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+MAX_BACKOFF_MULTIPLIER = 8
 
 
 def extract_supply_points(raw: Any) -> list[dict[str, Any]]:
@@ -94,15 +101,81 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self.detailed_history = detailed_history
+        self._base_update_interval = scan_interval
+        self._consecutive_failures = 0
+        self._last_error_type: str | None = None
+        self._last_error_detail: str | None = None
+
+    def _apply_backoff(self) -> None:
+        """Increase update interval when repeated errors occur."""
+        multiplier = min(2**self._consecutive_failures, MAX_BACKOFF_MULTIPLIER)
+        new_interval = self._base_update_interval * multiplier
+        if self.update_interval != new_interval:
+            _LOGGER.warning(
+                "Increasing ČEZ update interval due to repeated failures. failures=%s new_interval=%s",
+                self._consecutive_failures,
+                new_interval,
+            )
+            self.update_interval = new_interval
+
+    def _reset_backoff(self) -> None:
+        """Reset update interval after successful refresh."""
+        if self._consecutive_failures != 0:
+            _LOGGER.debug("Resetting ČEZ update backoff after successful refresh")
+        self._consecutive_failures = 0
+        self._last_error_type = None
+        self._last_error_detail = None
+        if self.update_interval != self._base_update_interval:
+            self.update_interval = self._base_update_interval
+
+    def _set_error(self, error_type: str, error: Exception) -> None:
+        """Store last refresh error diagnostics for entity attributes."""
+        self._last_error_type = error_type
+        self._last_error_detail = str(error)
+
+    def refresh_status_attributes(self) -> dict[str, Any]:
+        """Return lightweight refresh diagnostics for entities."""
+        return {
+            "refresh_error_type": self._last_error_type,
+            "refresh_error_detail": self._last_error_detail,
+            "refresh_consecutive_failures": self._consecutive_failures,
+            "refresh_effective_interval_min": (
+                int(self.update_interval.total_seconds() // 60) if self.update_interval else None
+            ),
+            "refresh_base_interval_min": int(self._base_update_interval.total_seconds() // 60),
+        }
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from ČEZ portal."""
         try:
-            return await self.hass.async_add_executor_job(self._fetch_sync)
+            result = await self.hass.async_add_executor_job(self._fetch_sync)
+            self._reset_backoff()
+            return result
+        except CezDistribuceAuthError as err:
+            self._consecutive_failures += 1
+            self._set_error("auth", err)
+            self._apply_backoff()
+            raise UpdateFailed(f"Authentication problem: {err}") from err
+        except CezDistribuceNetworkError as err:
+            self._consecutive_failures += 1
+            self._set_error("network", err)
+            self._apply_backoff()
+            raise UpdateFailed(f"Network problem: {err}") from err
+        except CezDistribuceUnexpectedResponseError as err:
+            self._consecutive_failures += 1
+            self._set_error("schema", err)
+            self._apply_backoff()
+            raise UpdateFailed(f"Unexpected portal response: {err}") from err
         except CezDistribuceError as err:
-            raise UpdateFailed(str(err)) from err
+            self._consecutive_failures += 1
+            self._set_error("portal", err)
+            self._apply_backoff()
+            raise UpdateFailed(f"Portal error: {err}") from err
         except Exception as err:
-            raise UpdateFailed(f"Unexpected ČEZ update error: {err}") from err
+            self._consecutive_failures += 1
+            self._set_error("unknown", err)
+            self._apply_backoff()
+            raise UpdateFailed(f"Unexpected update error: {err}") from err
 
     def _fetch_sync(self) -> dict[str, Any]:
         """Synchronous fetch run in executor."""

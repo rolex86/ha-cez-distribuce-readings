@@ -5,13 +5,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import requests
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.helpers import selector
 
-from .api import CezDistribuceAuthError, CezDistribuceClient
+from .api import (
+    CezDistribuceAuthError,
+    CezDistribuceClient,
+    CezDistribuceNetworkError,
+)
 from .const import (
     CONF_DETAILED_HISTORY,
     CONF_PASSWORD,
@@ -28,6 +31,7 @@ class CezDistribuceReadingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle config flow."""
 
     VERSION = 1
+    _reauth_entry: config_entries.ConfigEntry | None = None
 
     @staticmethod
     def async_get_options_flow(
@@ -70,16 +74,9 @@ class CezDistribuceReadingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     err,
                 )
                 errors["base"] = "invalid_auth"
-            except requests.Timeout as err:
+            except CezDistribuceNetworkError as err:
                 _LOGGER.exception(
-                    "ČEZ Distribuce setup timed out. Error type=%s, error=%s",
-                    type(err).__name__,
-                    err,
-                )
-                errors["base"] = "timeout"
-            except requests.RequestException as err:
-                _LOGGER.exception(
-                    "ČEZ Distribuce setup failed. Error type=%s, error=%s",
+                    "ČEZ Distribuce setup network failed. Error type=%s, error=%s",
                     type(err).__name__,
                     err,
                 )
@@ -133,6 +130,67 @@ class CezDistribuceReadingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
+            data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_reauth(self, entry_data: dict[str, Any]):
+        """Handle start of reauthentication flow."""
+        entry_id = entry_data.get("entry_id")
+        if not entry_id:
+            return self.async_abort(reason="unknown")
+
+        self._reauth_entry = self.hass.config_entries.async_get_entry(entry_id)
+        if self._reauth_entry is None:
+            return self.async_abort(reason="unknown")
+
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ):
+        """Confirm and store new password for reauthentication."""
+        if self._reauth_entry is None:
+            return self.async_abort(reason="unknown")
+
+        errors: dict[str, str] = {}
+        username = self._reauth_entry.data[CONF_USERNAME]
+
+        if user_input is not None:
+            password = user_input[CONF_PASSWORD]
+            client = CezDistribuceClient(username=username, password=password)
+            try:
+                await self.hass.async_add_executor_job(client.login)
+                await self.hass.async_add_executor_job(client.get_supply_points)
+            except CezDistribuceAuthError:
+                errors["base"] = "invalid_auth"
+            except CezDistribuceNetworkError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                errors["base"] = "unknown"
+            else:
+                updated_data = dict(self._reauth_entry.data)
+                updated_data[CONF_PASSWORD] = password
+                self.hass.config_entries.async_update_entry(
+                    self._reauth_entry,
+                    data=updated_data,
+                )
+                await self.hass.config_entries.async_reload(self._reauth_entry.entry_id)
+                return self.async_abort(reason="reauth_successful")
+
+        data_schema = vol.Schema(
+            {
+                vol.Required(CONF_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD,
+                    )
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
             data_schema=data_schema,
             errors=errors,
         )
