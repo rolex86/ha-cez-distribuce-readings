@@ -59,7 +59,6 @@ SENSORS: tuple[CezSensorDescription, ...] = (
         key="last_period_vt",
         translation_key="last_period_vt",
         kind="last_period_vt",
-        device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
@@ -67,7 +66,6 @@ SENSORS: tuple[CezSensorDescription, ...] = (
         key="last_period_nt",
         translation_key="last_period_nt",
         kind="last_period_nt",
-        device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
@@ -75,7 +73,6 @@ SENSORS: tuple[CezSensorDescription, ...] = (
         key="last_period_total",
         translation_key="last_period_total",
         kind="last_period_total",
-        device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
@@ -290,6 +287,9 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
             return "ok" if self.coordinator.last_update_success else "warn"
 
         if kind in (
+            "last_period_vt",
+            "last_period_nt",
+            "last_period_total",
             "last_period_days",
             "last_period_avg_daily",
             "last_period_nt_share",
@@ -308,6 +308,15 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
 
             if latest_period is None:
                 return None
+
+            if kind == "last_period_vt":
+                return latest_period.get("vt_kwh")
+
+            if kind == "last_period_nt":
+                return latest_period.get("nt_kwh")
+
+            if kind == "last_period_total":
+                return latest_period.get("total_kwh")
 
             if kind == "last_period_days":
                 return latest_period.get("days")
@@ -332,22 +341,6 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
 
         if kind == "state_total":
             return _round_decimal(_vt(latest) + _nt(latest))
-
-        previous = _previous_same_meter(readings, latest)
-
-        if previous is None:
-            return None
-
-        if kind == "last_period_vt":
-            return _round_decimal(_vt(latest) - _vt(previous))
-
-        if kind == "last_period_nt":
-            return _round_decimal(_nt(latest) - _nt(previous))
-
-        if kind == "last_period_total":
-            latest_total = _vt(latest) + _nt(latest)
-            previous_total = _vt(previous) + _nt(previous)
-            return _round_decimal(latest_total - previous_total)
 
         return None
 
