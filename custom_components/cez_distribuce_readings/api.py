@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import urllib.parse
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -31,6 +34,7 @@ PND_BROWSER_HEADERS = {
     ),
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
 }
+_PND_DEBUG_DIR = Path("/config/cez_distribuce_readings_debug")
 
 
 class CezDistribuceError(Exception):
@@ -114,6 +118,79 @@ class CezDistribuceClient:
             response.headers.get("content-type"),
             [(item.status_code, item.url) for item in response.history],
         )
+
+    def _sanitize_headers(self, headers: Any) -> dict[str, str]:
+        """Return request/response headers without secrets."""
+        sanitized: dict[str, str] = {}
+
+        if not headers:
+            return sanitized
+
+        for key, value in dict(headers).items():
+            if str(key).lower() in {"cookie", "authorization"}:
+                continue
+            sanitized[str(key)] = str(value)
+
+        return sanitized
+
+    def _dump_pnd_debug_response(
+        self,
+        kind: str,
+        response: requests.Response,
+        *,
+        payload: Any | None = None,
+    ) -> dict[str, str] | None:
+        """Persist a detailed PND debug dump for failed HTTP responses."""
+        try:
+            _PND_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            slug = kind.replace(" ", "_").replace("/", "_")
+            base_name = f"{stamp}_{slug}"
+            meta_path = _PND_DEBUG_DIR / f"{base_name}.json"
+            body_path = _PND_DEBUG_DIR / f"{base_name}.html"
+
+            body_text = response.text
+            request = response.request
+            debug_payload: dict[str, Any] = {
+                "captured_at": datetime.now().isoformat(),
+                "kind": kind,
+                "status_code": response.status_code,
+                "final_url": response.url,
+                "redirect_history": [
+                    {
+                        "status_code": item.status_code,
+                        "url": item.url,
+                        "location": item.headers.get("location"),
+                    }
+                    for item in response.history
+                ],
+                "request": {
+                    "method": request.method,
+                    "url": request.url,
+                    "headers": self._sanitize_headers(request.headers),
+                },
+                "session_cookie_count": len(self.session.cookies),
+                "response_cookie_count": len(response.cookies),
+                "response_headers": self._sanitize_headers(response.headers),
+                "body_preview": body_text[:3000],
+                "body_path": str(body_path),
+            }
+
+            if payload is not None:
+                debug_payload["payload"] = payload
+
+            meta_path.write_text(
+                json.dumps(debug_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            body_path.write_bytes(response.content)
+            return {
+                "meta_path": str(meta_path),
+                "body_path": str(body_path),
+            }
+        except Exception as err:
+            _LOGGER.warning("Unable to write PND debug dump for %s: %s", kind, err)
+            return None
 
     def _is_expected_oauth_redirect_404(self, response: requests.Response) -> bool:
         """Return true when CAS ended on the expected portal callback URL.
@@ -612,6 +689,16 @@ class CezDistribuceClient:
             response.url,
         )
 
+        dump_paths: dict[str, str] | None = None
+        if response.status_code >= 400:
+            dump_paths = self._dump_pnd_debug_response("pnd_warmup", response)
+            if dump_paths:
+                _LOGGER.warning(
+                    "PND warm-up debug dump saved: meta=%s body=%s",
+                    dump_paths["meta_path"],
+                    dump_paths["body_path"],
+                )
+
         if response.status_code in (401, 403):
             raise CezDistribuceAuthError(
                 f"PND warm-up auth failed: HTTP {response.status_code} at {response.url}"
@@ -681,6 +768,20 @@ class CezDistribuceClient:
             response.url,
             response.headers.get("content-type"),
         )
+
+        dump_paths: dict[str, str] | None = None
+        if response.status_code >= 400:
+            dump_paths = self._dump_pnd_debug_response(
+                "pnd_data",
+                response,
+                payload=payload,
+            )
+            if dump_paths:
+                _LOGGER.warning(
+                    "PND data debug dump saved: meta=%s body=%s",
+                    dump_paths["meta_path"],
+                    dump_paths["body_path"],
+                )
 
         if response.status_code in (401, 403):
             raise CezDistribuceAuthError(
