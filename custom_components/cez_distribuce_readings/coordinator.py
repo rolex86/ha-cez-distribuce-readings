@@ -138,12 +138,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=scan_interval,
         )
         self.client = client
-        self._pnd_client = CezDistribuceClient(
-            username=client.username,
-            password=client.password,
-            base_url=client.base_url,
-            client_id=client.client_id,
-        )
         self.detailed_history = detailed_history
         self.pnd_enabled = pnd_enabled
         self.pnd_device_set_id = (pnd_device_set_id or "").strip()
@@ -165,8 +159,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_pnd_attempt: datetime | None = None
         self._last_pnd_fetch: datetime | None = None
         self._last_pnd_success_at: datetime | None = None
-        self._pnd_warmed_up = False
-        self._pnd_login_generation = self._pnd_client.login_generation
         self._pnd_target_uids: set[str] = set()
         self._pnd_target_reason: str | None = None
         self._last_pnd_warmup_status_code: int | None = None
@@ -207,12 +199,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "skipped_reason": skipped_reason,
             **self._pnd_diag_attributes(),
         }
-
-    def _sync_pnd_warmup_state(self) -> None:
-        """Drop PND warm-up state when the dedicated PND login session changes."""
-        if self._pnd_client.login_generation != self._pnd_login_generation:
-            self._pnd_warmed_up = False
-            self._pnd_login_generation = self._pnd_client.login_generation
 
     def _pnd_fetch_due(self, now: datetime) -> bool:
         """Return true when the PND interval elapsed."""
@@ -274,19 +260,36 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _should_retry_pnd_after_relogin(self, error: Exception) -> bool:
         """Return true when one relogin + warm-up retry should be attempted."""
         if isinstance(error, CezDistribuceNetworkError):
-            return False
+            text = str(error)
+            return (
+                "PND warm-up" in text
+                or "PND data request failed: HTTP 500" in text
+                or "PND data request failed: HTTP 502" in text
+                or "PND data request failed: HTTP 503" in text
+            )
 
         return isinstance(
             error,
             (CezDistribuceAuthError, CezDistribuceUnexpectedResponseError, ValueError),
         )
 
+    def _new_pnd_client(self) -> CezDistribuceClient:
+        """Create a fresh isolated client/session for one PND fetch cycle."""
+        return CezDistribuceClient(
+            username=self.client.username,
+            password=self.client.password,
+            base_url=self.client.base_url,
+            client_id=self.client.client_id,
+        )
+
     def _fetch_pnd_archive(self, now: datetime) -> dict[str, Any]:
-        """Fetch one fresh PND archive using an isolated authenticated PND session."""
+        """Fetch one fresh PND archive using a brand new isolated PND session."""
         interval_start, interval_end = current_month_interval(now)
         interval_from = format_pnd_datetime(interval_start)
         interval_to = format_pnd_datetime(interval_end)
         last_error: Exception | None = None
+        pnd_client = self._new_pnd_client()
+        pnd_warmed_up = False
         self._last_pnd_attempt = now
         self._last_pnd_warmup_status_code = None
         self._last_pnd_warmup_url = None
@@ -294,17 +297,14 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_pnd_data_url = None
 
         for attempt in range(2):
-            self._sync_pnd_warmup_state()
-
             try:
-                if not self._pnd_warmed_up:
-                    warmup_info = self._pnd_client.warm_up_pnd_session()
+                if not pnd_warmed_up:
+                    warmup_info = pnd_client.warm_up_pnd_session()
                     self._last_pnd_warmup_status_code = warmup_info.get("status_code")
                     self._last_pnd_warmup_url = warmup_info.get("url")
-                    self._pnd_warmed_up = True
-                    self._pnd_login_generation = self._pnd_client.login_generation
+                    pnd_warmed_up = (warmup_info.get("status_code") or 0) < 400
 
-                payload, data_info = self._pnd_client.get_pnd_chart_data(
+                payload, data_info = pnd_client.get_pnd_chart_data(
                     id_device_set=self.pnd_device_set_id,
                     interval_from=interval_from,
                     interval_to=interval_to,
@@ -328,12 +328,11 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     break
 
                 _LOGGER.warning(
-                    "ČEZ PND fetch failed in isolated PND session, forcing relogin and retry. error=%s",
+                    "ČEZ PND fetch failed in isolated PND session, creating a fresh PND session and retrying. error=%s",
                     err,
                 )
-                self._pnd_client.force_login()
-                self._pnd_warmed_up = False
-                self._sync_pnd_warmup_state()
+                pnd_client = self._new_pnd_client()
+                pnd_warmed_up = False
 
         assert last_error is not None
         raise last_error
