@@ -503,6 +503,21 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         partial_errors: list[str] = []
 
+        pnd_now = dt_util.now()
+        pnd_due = self._pnd_fetch_due(pnd_now)
+        shared_pnd_archive: dict[str, Any] | None = None
+        shared_pnd_error: Exception | None = None
+
+        # PND is intentionally fetched before the normal DIP detail/history/signal
+        # requests. The standalone probe succeeds when it runs as a clean first
+        # flow; doing it here avoids any chance that the regular portal session
+        # or previous DIP requests influence the fragile PND OAuth callback.
+        if self.pnd_configured and pnd_due:
+            try:
+                shared_pnd_archive = self._fetch_pnd_archive(pnd_now)
+            except Exception as err:
+                shared_pnd_error = err
+
         raw_points = self.client.get_supply_points()
         points = extract_supply_points(raw_points)
 
@@ -517,10 +532,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         archives_by_uid: dict[str, dict[str, Any]] = {}
         pnd_archives_by_uid: dict[str, dict[str, Any]] = {}
         pnd_status_by_uid: dict[str, dict[str, Any]] = {}
-        pnd_now = dt_util.now()
-        pnd_due = self._pnd_fetch_due(pnd_now)
-        shared_pnd_archive: dict[str, Any] | None = None
-        shared_pnd_error: Exception | None = None
         point_refs: list[tuple[str, str | None]] = []
 
         archive_dir = Path(self.hass.config.path("cez_distribuce_readings"))
