@@ -9,6 +9,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import (
     CezDistribuceAuthError,
@@ -18,7 +19,14 @@ from .api import (
     CezDistribuceUnexpectedResponseError,
 )
 from .archive import build_archive, save_archive
-from .const import DOMAIN
+from .const import DOMAIN, MIN_PND_UPDATE_INTERVAL_MIN
+from .pnd import (
+    build_pnd_archive,
+    current_month_interval,
+    format_pnd_datetime,
+    load_pnd_archive,
+    save_pnd_archive,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,6 +125,11 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         client: CezDistribuceClient,
         scan_interval: timedelta,
         detailed_history: bool,
+        pnd_enabled: bool,
+        pnd_device_set_id: str | None,
+        pnd_id_assembly: int,
+        pnd_target: str | None,
+        pnd_update_interval_min: int,
     ) -> None:
         super().__init__(
             hass,
@@ -126,6 +139,14 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self.detailed_history = detailed_history
+        self.pnd_enabled = pnd_enabled
+        self.pnd_device_set_id = (pnd_device_set_id or "").strip()
+        self.pnd_id_assembly = pnd_id_assembly
+        self.pnd_target = (pnd_target or "").strip()
+        self.pnd_update_interval = timedelta(
+            minutes=max(pnd_update_interval_min, MIN_PND_UPDATE_INTERVAL_MIN)
+        )
+        self.pnd_configured = bool(self.pnd_enabled and self.pnd_device_set_id)
         self._base_update_interval = scan_interval
         self._consecutive_failures = 0
         self._last_error_type: str | None = None
@@ -135,6 +156,149 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_failure_at: datetime | None = None
         self._last_attempt_success: bool | None = None
         self._using_stale_data = False
+        self._last_pnd_attempt: datetime | None = None
+        self._last_pnd_fetch: datetime | None = None
+        self._pnd_warmed_up = False
+        self._pnd_login_generation = client.login_generation
+        self._pnd_target_uids: set[str] = set()
+        self._pnd_target_reason: str | None = None
+
+    def _build_pnd_status(
+        self,
+        *,
+        enabled: bool,
+        configured: bool,
+        ok: bool | None,
+        error_type: str | None = None,
+        error_detail: str | None = None,
+        using_cached_data: bool = False,
+        skipped_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Build compact per-UID PND status."""
+        return {
+            "enabled": enabled,
+            "configured": configured,
+            "ok": ok,
+            "error_type": error_type,
+            "error_detail": error_detail,
+            "using_cached_data": using_cached_data,
+            "skipped_reason": skipped_reason,
+        }
+
+    def _sync_pnd_warmup_state(self) -> None:
+        """Drop PND warm-up state when the shared login session changes."""
+        if self.client.login_generation != self._pnd_login_generation:
+            self._pnd_warmed_up = False
+            self._pnd_login_generation = self.client.login_generation
+
+    def _pnd_fetch_due(self, now: datetime) -> bool:
+        """Return true when the PND interval elapsed."""
+        if self._last_pnd_attempt is None:
+            return True
+
+        return now - self._last_pnd_attempt >= self.pnd_update_interval
+
+    def _resolve_pnd_target_uids(
+        self,
+        point_refs: list[tuple[str, str | None]],
+    ) -> tuple[set[str], str | None]:
+        """Resolve which supply point(s) should receive the optional PND data."""
+        if not self.pnd_configured:
+            return set(), "not_configured"
+
+        if not point_refs:
+            return set(), "no_points"
+
+        if self.pnd_target:
+            target = self.pnd_target.casefold()
+            matched = {
+                uid
+                for uid, ean in point_refs
+                if uid.casefold() == target or (ean and ean.casefold() == target)
+            }
+            if matched:
+                return matched, None
+
+            _LOGGER.warning(
+                "ČEZ PND target %s does not match any current supply point uid/ean",
+                self.pnd_target,
+            )
+            return set(), "target_not_found"
+
+        if len(point_refs) == 1:
+            return {point_refs[0][0]}, None
+
+        _LOGGER.warning(
+            "ČEZ PND is configured but the account has multiple supply points. "
+            "Set pnd_target to one uid/ean to enable PND entities."
+        )
+        return set(), "target_not_selected"
+
+    def is_pnd_target(self, uid: str, ean: str | None) -> bool:
+        """Return true if this supply point should expose PND entities."""
+        if not self.pnd_configured:
+            return False
+
+        if uid in self._pnd_target_uids:
+            return True
+
+        if self.pnd_target:
+            target = self.pnd_target.casefold()
+            return uid.casefold() == target or (ean and ean.casefold() == target)
+
+        return False
+
+    def _should_retry_pnd_after_relogin(self, error: Exception) -> bool:
+        """Return true when one relogin + warm-up retry should be attempted."""
+        if isinstance(error, CezDistribuceNetworkError):
+            return False
+
+        return isinstance(
+            error,
+            (CezDistribuceAuthError, CezDistribuceUnexpectedResponseError, ValueError),
+        )
+
+    def _fetch_pnd_archive(self, now: datetime) -> dict[str, Any]:
+        """Fetch one fresh PND archive using the shared authenticated session."""
+        interval_start, interval_end = current_month_interval(now)
+        interval_from = format_pnd_datetime(interval_start)
+        interval_to = format_pnd_datetime(interval_end)
+        last_error: Exception | None = None
+        self._last_pnd_attempt = now
+
+        for attempt in range(2):
+            self._sync_pnd_warmup_state()
+
+            try:
+                if not self._pnd_warmed_up:
+                    self.client.warm_up_pnd_session()
+                    self._pnd_warmed_up = True
+                    self._pnd_login_generation = self.client.login_generation
+
+                payload = self.client.get_pnd_chart_data(
+                    id_device_set=self.pnd_device_set_id,
+                    interval_from=interval_from,
+                    interval_to=interval_to,
+                    id_assembly=self.pnd_id_assembly,
+                )
+                archive = build_pnd_archive(payload, interval_from, interval_to)
+                self._last_pnd_fetch = now
+                return archive
+            except Exception as err:
+                last_error = err
+                if attempt >= 1 or not self._should_retry_pnd_after_relogin(err):
+                    break
+
+                _LOGGER.warning(
+                    "ČEZ PND fetch failed, forcing relogin and retry. error=%s",
+                    err,
+                )
+                self.client.force_login()
+                self._pnd_warmed_up = False
+                self._sync_pnd_warmup_state()
+
+        assert last_error is not None
+        raise last_error
 
     def _set_failure_retry_interval(self) -> None:
         """Set a short retry interval after a failed refresh."""
@@ -300,6 +464,9 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         old_readings_by_uid = old_data.get("readings_by_uid", {}) if isinstance(old_data, dict) else {}
         old_signals_by_uid = old_data.get("signals_by_uid", {}) if isinstance(old_data, dict) else {}
         old_archives_by_uid = old_data.get("archives_by_uid", {}) if isinstance(old_data, dict) else {}
+        old_pnd_archives_by_uid = (
+            old_data.get("pnd_archives_by_uid", {}) if isinstance(old_data, dict) else {}
+        )
 
         partial_errors: list[str] = []
 
@@ -315,6 +482,13 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         details_by_uid: dict[str, dict[str, Any]] = {}
         signals_by_uid: dict[str, Any] = {}
         archives_by_uid: dict[str, dict[str, Any]] = {}
+        pnd_archives_by_uid: dict[str, dict[str, Any]] = {}
+        pnd_status_by_uid: dict[str, dict[str, Any]] = {}
+        pnd_now = dt_util.now()
+        pnd_due = self._pnd_fetch_due(pnd_now)
+        shared_pnd_archive: dict[str, Any] | None = None
+        shared_pnd_error: Exception | None = None
+        point_refs: list[tuple[str, str | None]] = []
 
         archive_dir = Path(self.hass.config.path("cez_distribuce_readings"))
 
@@ -349,6 +523,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.warning("Unable to fetch supply point detail for uid=%s: %s", uid, err)
 
             ean = extract_ean(detail, point)
+            point_refs.append((uid, ean))
 
             try:
                 readings = self.client.get_meter_reading_history(
@@ -444,11 +619,97 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("No EAN found for uid=%s, skipping HDO signals", uid)
                 signals_by_uid[uid] = old_signals_by_uid.get(uid) if uid in old_signals_by_uid else None
 
+        target_uids, target_reason = self._resolve_pnd_target_uids(point_refs)
+        self._pnd_target_uids = target_uids
+        self._pnd_target_reason = target_reason
+
+        for uid, ean in point_refs:
+            archive_key = ean or uid
+            old_pnd_archive = old_pnd_archives_by_uid.get(uid)
+            loaded_pnd_archive = load_pnd_archive(archive_dir, archive_key)
+            fallback_pnd_archive = (
+                old_pnd_archive
+                if isinstance(old_pnd_archive, dict) and old_pnd_archive
+                else loaded_pnd_archive or {}
+            )
+
+            if not self.pnd_configured:
+                pnd_archives_by_uid[uid] = {}
+                pnd_status_by_uid[uid] = self._build_pnd_status(
+                    enabled=False,
+                    configured=False,
+                    ok=None,
+                    skipped_reason="not_configured",
+                )
+                continue
+
+            if uid not in target_uids:
+                pnd_archives_by_uid[uid] = {}
+                pnd_status_by_uid[uid] = self._build_pnd_status(
+                    enabled=True,
+                    configured=False,
+                    ok=None,
+                    skipped_reason=target_reason or "not_targeted",
+                )
+                continue
+
+            if not pnd_due:
+                pnd_archives_by_uid[uid] = fallback_pnd_archive
+                pnd_status_by_uid[uid] = self._build_pnd_status(
+                    enabled=True,
+                    configured=True,
+                    ok=True if fallback_pnd_archive else None,
+                    using_cached_data=True,
+                    skipped_reason="update_interval_not_elapsed",
+                )
+                continue
+
+            if shared_pnd_archive is None and shared_pnd_error is None:
+                try:
+                    shared_pnd_archive = self._fetch_pnd_archive(pnd_now)
+                except Exception as err:
+                    shared_pnd_error = err
+
+            if shared_pnd_archive is not None:
+                archive = dict(shared_pnd_archive)
+
+                try:
+                    archive_paths = save_pnd_archive(archive, archive_dir, archive_key)
+                    archive.update(archive_paths)
+                except Exception as save_err:
+                    _LOGGER.warning(
+                        "Unable to save ČEZ PND archive for uid=%s key=%s: %s",
+                        uid,
+                        archive_key,
+                        save_err,
+                    )
+
+                pnd_archives_by_uid[uid] = archive
+                pnd_status_by_uid[uid] = self._build_pnd_status(
+                    enabled=True,
+                    configured=True,
+                    ok=True,
+                    using_cached_data=False,
+                )
+                continue
+
+            pnd_archives_by_uid[uid] = fallback_pnd_archive
+            pnd_status_by_uid[uid] = self._build_pnd_status(
+                enabled=True,
+                configured=True,
+                ok=False,
+                error_type=type(shared_pnd_error).__name__ if shared_pnd_error else "UnknownError",
+                error_detail=_short_error(shared_pnd_error) if shared_pnd_error else "Unknown error",
+                using_cached_data=bool(fallback_pnd_archive),
+            )
+
         return {
             "points": points,
             "details_by_uid": details_by_uid,
             "readings_by_uid": readings_by_uid,
             "signals_by_uid": signals_by_uid,
             "archives_by_uid": archives_by_uid,
+            "pnd_archives_by_uid": pnd_archives_by_uid,
+            "pnd_status_by_uid": pnd_status_by_uid,
             "_partial_refresh_errors": partial_errors,
         }

@@ -24,6 +24,27 @@ def _sanitize_archive(archive: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sanitize_pnd_archive(archive: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+    """Keep only compact non-sensitive PND diagnostics."""
+    return {
+        "unit_y": archive.get("unit_y"),
+        "interval_from": archive.get("interval_from"),
+        "interval_to": archive.get("interval_to"),
+        "measurements_count": archive.get("measurements_count"),
+        "total_kwh": archive.get("total_kwh"),
+        "avg_kwh_day": archive.get("avg_kwh_day"),
+        "max_kw": archive.get("max_kw"),
+        "has_export_file": bool(archive.get("json_path")),
+        "status": {
+            "enabled": status.get("enabled"),
+            "configured": status.get("configured"),
+            "ok": status.get("ok"),
+            "using_cached_data": status.get("using_cached_data"),
+            "error_type": status.get("error_type"),
+        },
+    }
+
+
 def _build_data_summary(data: dict[str, Any]) -> dict[str, Any]:
     """Build anonymized summary from coordinator data."""
     points = data.get("points", [])
@@ -31,6 +52,8 @@ def _build_data_summary(data: dict[str, Any]) -> dict[str, Any]:
     readings_by_uid = data.get("readings_by_uid", {})
     signals_by_uid = data.get("signals_by_uid", {})
     archives_by_uid = data.get("archives_by_uid", {})
+    pnd_archives_by_uid = data.get("pnd_archives_by_uid", {})
+    pnd_status_by_uid = data.get("pnd_status_by_uid", {})
 
     return {
         "points_count": len(points) if isinstance(points, list) else None,
@@ -43,6 +66,16 @@ def _build_data_summary(data: dict[str, Any]) -> dict[str, Any]:
             if isinstance(uid, str) and isinstance(archive, dict)
         }
         if isinstance(archives_by_uid, dict)
+        else {},
+        "pnd_summary_by_uid": {
+            uid: _sanitize_pnd_archive(
+                archive if isinstance(archive, dict) else {},
+                pnd_status_by_uid.get(uid, {}) if isinstance(pnd_status_by_uid, dict) else {},
+            )
+            for uid, archive in pnd_archives_by_uid.items()
+            if isinstance(uid, str)
+        }
+        if isinstance(pnd_archives_by_uid, dict)
         else {},
         "sample_point_keys": sorted(points[0].keys()) if points and isinstance(points[0], dict) else [],
     }

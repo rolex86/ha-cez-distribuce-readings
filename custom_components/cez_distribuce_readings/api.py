@@ -14,6 +14,7 @@ from .const import (
     CEZ_DISTRIBUCE_BASE_URL,
     CEZ_DISTRIBUCE_CLIENT_ID,
     CLIENT_NAME,
+    PND_BASE_URL,
     RESPONSE_TYPE,
     SCOPE,
 )
@@ -72,6 +73,7 @@ class CezDistribuceClient:
             }
         )
         self._logged_in = False
+        self._login_generation = 0
 
         self.service_url = (
             f"{CAS_BASE_URL}/oauth2.0/callbackAuthorize"
@@ -190,6 +192,11 @@ class CezDistribuceClient:
         self.session.headers.pop("X-Request-Token", None)
         self._logged_in = False
 
+    @property
+    def login_generation(self) -> int:
+        """Return a monotonic number that changes after each successful login."""
+        return self._login_generation
+
     def _request_with_network_errors(
         self,
         method: str,
@@ -203,6 +210,36 @@ class CezDistribuceClient:
             raise CezDistribuceNetworkError(f"ČEZ request timed out for {url}") from err
         except requests.RequestException as err:
             raise CezDistribuceNetworkError(f"ČEZ request failed for {url}") from err
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        ensure_login: bool = True,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Execute one HTTP request through the shared authenticated session."""
+        if ensure_login:
+            self.ensure_logged_in()
+
+        return self._request_with_network_errors(method, url, **kwargs)
+
+    def _is_login_page_response(self, response: requests.Response) -> bool:
+        """Return true when the final response is a CAS login page."""
+        response_url = response.url.lower()
+        if "cas.cez.cz" in response_url and "/login" in response_url:
+            return True
+
+        if not self._looks_like_html(response):
+            return False
+
+        body_start = response.text[:4000].lower()
+        return (
+            'name="execution"' in body_start
+            or 'id="fm1"' in body_start
+            or "<title>login" in body_start
+        )
 
     def login(self) -> None:
         """Login and refresh portal X-Request-Token."""
@@ -256,6 +293,7 @@ class CezDistribuceClient:
 
         self.refresh_api_token()
         self._logged_in = True
+        self._login_generation += 1
         _LOGGER.debug("ČEZ Distribuce login completed successfully")
 
     def force_login(self) -> None:
@@ -321,6 +359,8 @@ class CezDistribuceClient:
         self,
         response: requests.Response,
         label: str,
+        *,
+        invalid_json_as_auth_error: bool = False,
     ) -> Any:
         """Decode JSON or raise an auth error when HTML was returned."""
         if self._looks_like_html(response):
@@ -346,6 +386,10 @@ class CezDistribuceClient:
                 response.headers.get("content-type"),
                 response.text[:1000],
             )
+            if invalid_json_as_auth_error:
+                raise CezDistribuceAuthError(
+                    f"ČEZ portal returned non-JSON response from {response.url}"
+                ) from err
             raise CezDistribuceError(
                 f"ČEZ portal returned non-JSON response from {response.url}"
             ) from err
@@ -374,7 +418,15 @@ class CezDistribuceClient:
         self.session.headers.update({"X-Request-Token": token})
         _LOGGER.debug("ČEZ X-Request-Token loaded successfully")
 
-    def _request_json(self, method: str, url: str, **kwargs: Any) -> Any:
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        relogin_on_auth_failure: bool = True,
+        invalid_json_as_auth_error: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """Call portal JSON endpoint and unwrap ČEZ response envelope."""
         self.ensure_logged_in()
 
@@ -396,6 +448,10 @@ class CezDistribuceClient:
                     "Portal returned HTTP %s, forcing fresh login",
                     response.status_code,
                 )
+                if not relogin_on_auth_failure:
+                    raise CezDistribuceAuthError(
+                        f"ČEZ endpoint returned HTTP {response.status_code} for {url}"
+                    )
                 self.force_login()
                 continue
 
@@ -407,10 +463,14 @@ class CezDistribuceClient:
                 ) from err
 
             try:
-                payload = self._json_or_auth_error(response, "ČEZ JSON response")
+                payload = self._json_or_auth_error(
+                    response,
+                    "ČEZ JSON response",
+                    invalid_json_as_auth_error=invalid_json_as_auth_error,
+                )
             except CezDistribuceAuthError as err:
                 last_error = err
-                if attempt + 1 >= LOGIN_RETRIES:
+                if not relogin_on_auth_failure or attempt + 1 >= LOGIN_RETRIES:
                     break
 
                 _LOGGER.debug(
@@ -433,6 +493,10 @@ class CezDistribuceClient:
                         "Portal returned JSON statusCode %s, forcing fresh login",
                         status_code,
                     )
+                    if not relogin_on_auth_failure:
+                        raise CezDistribuceAuthError(
+                            f"ČEZ portal returned statusCode={status_code}"
+                        )
                     self.force_login()
                     continue
 
@@ -446,6 +510,9 @@ class CezDistribuceClient:
                     return payload["data"]
 
             return payload
+
+        if last_error is not None and not relogin_on_auth_failure:
+            raise last_error
 
         if last_error is not None:
             raise CezDistribuceAuthError(
@@ -497,6 +564,67 @@ class CezDistribuceClient:
         """Return HDO / signal switching times for EAN."""
         url = f"{self.base_url}/prehled-om?path=supply-point-detail/signals/{ean}"
         return self._request_json("GET", url)
+
+    def warm_up_pnd_session(self) -> None:
+        """Open the PND dashboard once to initialize PND cookies/session."""
+        url = f"{PND_BASE_URL}/external/dashboard/view"
+        response = self._request(
+            "GET",
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://pnd.cezdistribuce.cz/",
+            },
+        )
+        self._debug_response("ČEZ PND warm-up response", response)
+
+        if response.status_code in (401, 403):
+            raise CezDistribuceAuthError(
+                f"ČEZ PND warm-up failed with HTTP {response.status_code}"
+            )
+
+        try:
+            response.raise_for_status()
+        except requests.RequestException as err:
+            raise CezDistribuceNetworkError("Unable to warm up ČEZ PND session") from err
+
+        if self._is_login_page_response(response):
+            raise CezDistribuceAuthError("ČEZ PND warm-up ended on login page")
+
+    def get_pnd_chart_data(
+        self,
+        id_device_set: str | int,
+        interval_from: str,
+        interval_to: str,
+        id_assembly: int = -1001,
+    ) -> Any:
+        """Return PND chart payload for the selected device set."""
+        url = f"{PND_BASE_URL}/external/data"
+
+        payload = {
+            "format": "chart",
+            "idAssembly": id_assembly,
+            "idDeviceSet": str(id_device_set),
+            "intervalFrom": interval_from,
+            "intervalTo": interval_to,
+            "compareFrom": None,
+            "opmId": None,
+            "electrometerId": None,
+        }
+
+        return self._request_json(
+            "POST",
+            url,
+            json=payload,
+            headers={
+                "Origin": "https://pnd.cezdistribuce.cz",
+                "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+            },
+            relogin_on_auth_failure=False,
+            invalid_json_as_auth_error=True,
+        )
 
     def get_signals_export_raw(self, ean: str) -> bytes:
         """Return raw signals export.

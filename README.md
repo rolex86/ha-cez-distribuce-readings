@@ -8,8 +8,9 @@ Home Assistant custom integration for reading electricity meter data from the Č
 - Reauthentication flow when credentials expire or change
 - Load supply points
 - Load meter reading history
+- Optional 15-minute PND data branch with a separate refresh interval
 - Adaptive retries, relogin, and refresh backoff on repeated failures
-- Options flow (change update interval and detailed history without removing integration)
+- Options flow (change update interval, detailed history, and optional PND settings without removing integration)
 - Create sensors for:
   - VT meter state
   - NT meter state
@@ -19,6 +20,7 @@ Home Assistant custom integration for reading electricity meter data from the Č
   - last reading period total consumption
   - archive readings and period counts
   - refresh health (`ok` / `warn` / `error`)
+  - optional PND consumption / power summary sensors
 - Load HDO / low tariff signal schedule
 - Create binary sensors:
   - low tariff currently active
@@ -31,8 +33,28 @@ This integration currently uses ČEZ Distribuce portal endpoints for:
 
 - monthly / control / billing meter readings
 - HDO / signal switching times
+- optional PND 15-minute chart data
 
-It does not yet use PND interval data. PND support can be added later when PND access is available.
+PND support is fully optional:
+
+- without PND, the integration behaves the same as before
+- no PND entities are created
+- no PND endpoint is called
+- no migration of existing config entries is required
+
+When enabled in options:
+
+- `idDeviceSet` must be filled manually
+- PND uses the same authenticated session as the main integration
+- a PND warm-up request is done before the first PND fetch after startup/relogin
+- on PND auth/session problems the integration performs re-login and one retry
+- PND errors do not affect the main readings branch, HDO, or main `refresh_health`
+- the PND endpoint returns power in `kW`
+- energy is calculated from each valid 15-minute point as `kW × 0.25`
+- rows with invalid/unknown status are ignored
+- the full PND archive is saved only to JSON
+- Home Assistant attributes expose only small aggregates, not the full 15-minute dataset
+- PND is refreshed on its own interval, recommended `60` minutes or more
 
 ## Configuration and options
 
@@ -44,6 +66,13 @@ Initial setup asks for:
 - detailed meter reading history toggle
 
 After setup, options can be changed from the integration UI. Saving options reloads the config entry automatically.
+
+Optional PND settings in options:
+
+- enable/disable PND
+- `PND idDeviceSet`
+- `PND idAssembly` (default `-1001`)
+- `PND update interval` in minutes (minimum `30`, recommended `60` to `180`)
 
 ## Health and error visibility
 
@@ -69,6 +98,7 @@ The integration provides Home Assistant diagnostics (`diagnostics.py`) with:
 - current options
 - coordinator status
 - anonymized data-shape summary (counts and keys, without sensitive payloads)
+- compact PND summary without raw 15-minute measurements
 
 ## Installation via HACS
 

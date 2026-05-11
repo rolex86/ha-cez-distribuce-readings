@@ -14,10 +14,11 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfEnergy
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import CezDistribuceCoordinator, extract_ean
@@ -30,7 +31,7 @@ class CezSensorDescription(SensorEntityDescription):
     kind: str
 
 
-SENSORS: tuple[CezSensorDescription, ...] = (
+BASE_SENSORS: tuple[CezSensorDescription, ...] = (
     CezSensorDescription(
         key="state_vt",
         translation_key="state_vt",
@@ -123,6 +124,51 @@ SENSORS: tuple[CezSensorDescription, ...] = (
     ),
 )
 
+PND_SENSORS: tuple[CezSensorDescription, ...] = (
+    CezSensorDescription(
+        key="pnd_spotreba_obdobi",
+        translation_key="pnd_spotreba_obdobi",
+        kind="pnd_spotreba_obdobi",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    ),
+    CezSensorDescription(
+        key="pnd_prumer_den",
+        translation_key="pnd_prumer_den",
+        kind="pnd_prumer_den",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="kWh/d",
+    ),
+    CezSensorDescription(
+        key="pnd_max_kw",
+        translation_key="pnd_max_kw",
+        kind="pnd_max_kw",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+    ),
+    CezSensorDescription(
+        key="pnd_posledni_kw",
+        translation_key="pnd_posledni_kw",
+        kind="pnd_posledni_kw",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+    ),
+    CezSensorDescription(
+        key="pnd_posledni_mereni",
+        translation_key="pnd_posledni_mereni",
+        kind="pnd_posledni_mereni",
+        device_class=SensorDeviceClass.TIMESTAMP,
+    ),
+    CezSensorDescription(
+        key="pnd_health",
+        translation_key="pnd_health",
+        kind="pnd_health",
+    ),
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -142,7 +188,7 @@ async def async_setup_entry(
         detail = coordinator.data.get("details_by_uid", {}).get(uid, {})
         ean = extract_ean(detail, point)
 
-        for description in SENSORS:
+        for description in BASE_SENSORS:
             entities.append(
                 CezReadingSensor(
                     coordinator=coordinator,
@@ -151,6 +197,17 @@ async def async_setup_entry(
                     description=description,
                 )
             )
+
+        if coordinator.pnd_configured and coordinator.is_pnd_target(uid, ean):
+            for description in PND_SENSORS:
+                entities.append(
+                    CezReadingSensor(
+                        coordinator=coordinator,
+                        uid=uid,
+                        ean=ean,
+                        description=description,
+                    )
+                )
 
     async_add_entities(entities)
 
@@ -225,6 +282,22 @@ def _round_decimal(value: Decimal | None) -> float | None:
     return float(round(value, 3))
 
 
+def _parse_sensor_datetime(value: Any) -> datetime | None:
+    """Parse archive datetime into a HA-friendly timezone-aware datetime."""
+    if value is None:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+
+    return parsed
+
+
 class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity):
     """ČEZ reading sensor."""
 
@@ -266,8 +339,21 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
         latest_period = self._archive().get("latest_period")
         return latest_period if isinstance(latest_period, dict) else None
 
+    def _pnd_archive(self) -> dict[str, Any]:
+        """Return compact PND archive for this supply point."""
+        return self.coordinator.data.get("pnd_archives_by_uid", {}).get(self._uid, {})
+
+    def _pnd_status(self) -> dict[str, Any]:
+        """Return per-UID PND status."""
+        return self.coordinator.data.get("pnd_status_by_uid", {}).get(self._uid, {})
+
+    def _last_valid_pnd(self) -> dict[str, Any] | None:
+        """Return latest valid PND measurement."""
+        last_valid = self._pnd_archive().get("last_valid")
+        return last_valid if isinstance(last_valid, dict) else None
+
     @property
-    def native_value(self) -> float | int | str | None:
+    def native_value(self) -> float | int | str | datetime | None:
         """Return sensor state."""
         readings = self.coordinator.data.get("readings_by_uid", {}).get(self._uid, [])
         latest = _latest_reading(readings)
@@ -330,6 +416,37 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
             if kind == "last_period_vt_share":
                 return latest_period.get("vt_share_percent")
 
+        if kind == "pnd_spotreba_obdobi":
+            return self._pnd_archive().get("total_kwh")
+
+        if kind == "pnd_prumer_den":
+            return self._pnd_archive().get("avg_kwh_day")
+
+        if kind == "pnd_max_kw":
+            return self._pnd_archive().get("max_kw")
+
+        if kind == "pnd_posledni_kw":
+            last_valid = self._last_valid_pnd()
+            return last_valid.get("kw") if last_valid else None
+
+        if kind == "pnd_posledni_mereni":
+            last_valid = self._last_valid_pnd()
+            return _parse_sensor_datetime(last_valid.get("end_time")) if last_valid else None
+
+        if kind == "pnd_health":
+            status = self._pnd_status()
+            if not status.get("configured"):
+                return "disabled"
+            if status.get("ok") is False and status.get("using_cached_data"):
+                return "cached"
+            if status.get("ok") is False:
+                return "error"
+            if status.get("using_cached_data"):
+                return "cached"
+            if status.get("ok") is True:
+                return "ok"
+            return "disabled"
+
         if latest is None:
             return None
 
@@ -347,6 +464,33 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return attributes."""
+        kind = self.entity_description.kind
+
+        if kind.startswith("pnd_"):
+            archive = self._pnd_archive()
+            status = self._pnd_status()
+            attrs: dict[str, Any] = {
+                "uid": self._uid,
+                "ean": self._ean,
+                "pnd_enabled": status.get("enabled"),
+                "pnd_configured": status.get("configured"),
+                "pnd_ok": status.get("ok"),
+                "pnd_error_type": status.get("error_type"),
+                "pnd_error_detail": status.get("error_detail"),
+                "pnd_using_cached_data": status.get("using_cached_data"),
+                "pnd_skipped_reason": status.get("skipped_reason"),
+                "pnd_unit_y": archive.get("unit_y"),
+                "pnd_interval_from": archive.get("interval_from"),
+                "pnd_interval_to": archive.get("interval_to"),
+                "pnd_measurements_count": archive.get("measurements_count"),
+                "pnd_json_path": archive.get("json_path"),
+            }
+
+            if kind == "pnd_spotreba_obdobi" and isinstance(archive.get("daily_totals"), list):
+                attrs["daily_totals"] = archive.get("daily_totals")
+
+            return attrs
+
         readings = self.coordinator.data.get("readings_by_uid", {}).get(self._uid, [])
         latest = _latest_reading(readings)
         archive = self._archive()
@@ -385,8 +529,6 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
 
         if latest_period is not None:
             attrs["latest_period"] = latest_period
-
-        kind = self.entity_description.kind
 
         if kind in ("archive_readings_count", "archive_periods_count"):
             periods = archive.get("periods", [])

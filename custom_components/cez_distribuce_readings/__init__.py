@@ -11,8 +11,18 @@ from .api import CezDistribuceClient
 from .const import (
     CONF_DETAILED_HISTORY,
     CONF_PASSWORD,
+    CONF_PND_DEVICE_SET_ID,
+    CONF_PND_ENABLED,
+    CONF_PND_ID_ASSEMBLY,
+    CONF_PND_TARGET,
+    CONF_PND_UPDATE_INTERVAL_MIN,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
+    DEFAULT_PND_DEVICE_SET_ID,
+    DEFAULT_PND_ENABLED,
+    DEFAULT_PND_ID_ASSEMBLY,
+    DEFAULT_PND_TARGET,
+    DEFAULT_PND_UPDATE_INTERVAL_MIN,
     DEFAULT_SCAN_INTERVAL_MIN,
     DOMAIN,
     PLATFORMS,
@@ -39,6 +49,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DETAILED_HISTORY,
         entry.data.get(CONF_DETAILED_HISTORY, True),
     )
+    pnd_enabled = entry.options.get(
+        CONF_PND_ENABLED,
+        entry.data.get(CONF_PND_ENABLED, DEFAULT_PND_ENABLED),
+    )
+    pnd_device_set_id = entry.options.get(
+        CONF_PND_DEVICE_SET_ID,
+        entry.data.get(CONF_PND_DEVICE_SET_ID, DEFAULT_PND_DEVICE_SET_ID),
+    )
+    pnd_id_assembly = entry.options.get(
+        CONF_PND_ID_ASSEMBLY,
+        entry.data.get(CONF_PND_ID_ASSEMBLY, DEFAULT_PND_ID_ASSEMBLY),
+    )
+    pnd_target = entry.options.get(
+        CONF_PND_TARGET,
+        entry.data.get(CONF_PND_TARGET, DEFAULT_PND_TARGET),
+    )
+    pnd_update_interval_min = entry.options.get(
+        CONF_PND_UPDATE_INTERVAL_MIN,
+        entry.data.get(CONF_PND_UPDATE_INTERVAL_MIN, DEFAULT_PND_UPDATE_INTERVAL_MIN),
+    )
 
     client = CezDistribuceClient(username=username, password=password)
 
@@ -47,6 +77,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         client=client,
         scan_interval=timedelta(minutes=scan_interval_min),
         detailed_history=detailed_history,
+        pnd_enabled=bool(pnd_enabled),
+        pnd_device_set_id=str(pnd_device_set_id or ""),
+        pnd_id_assembly=int(pnd_id_assembly),
+        pnd_target=str(pnd_target or ""),
+        pnd_update_interval_min=int(pnd_update_interval_min),
     )
 
     await coordinator.async_config_entry_first_refresh()

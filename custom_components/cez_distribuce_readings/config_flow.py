@@ -18,13 +18,47 @@ from .api import (
 from .const import (
     CONF_DETAILED_HISTORY,
     CONF_PASSWORD,
+    CONF_PND_DEVICE_SET_ID,
+    CONF_PND_ENABLED,
+    CONF_PND_ID_ASSEMBLY,
+    CONF_PND_TARGET,
+    CONF_PND_UPDATE_INTERVAL_MIN,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
+    DEFAULT_PND_DEVICE_SET_ID,
+    DEFAULT_PND_ENABLED,
+    DEFAULT_PND_ID_ASSEMBLY,
+    DEFAULT_PND_TARGET,
+    DEFAULT_PND_UPDATE_INTERVAL_MIN,
     DEFAULT_SCAN_INTERVAL_MIN,
     DOMAIN,
+    MIN_PND_UPDATE_INTERVAL_MIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_pnd_options(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize optional PND options into a backward-compatible shape."""
+    normalized = dict(user_input)
+    pnd_device_set_id = str(normalized.get(CONF_PND_DEVICE_SET_ID) or "").strip()
+    pnd_enabled = bool(normalized.get(CONF_PND_ENABLED, DEFAULT_PND_ENABLED))
+    pnd_id_assembly = int(normalized.get(CONF_PND_ID_ASSEMBLY, DEFAULT_PND_ID_ASSEMBLY))
+    pnd_target = str(normalized.get(CONF_PND_TARGET, DEFAULT_PND_TARGET) or "").strip()
+    pnd_update_interval_min = max(
+        int(normalized.get(CONF_PND_UPDATE_INTERVAL_MIN, DEFAULT_PND_UPDATE_INTERVAL_MIN) or 0),
+        MIN_PND_UPDATE_INTERVAL_MIN,
+    )
+
+    if not pnd_device_set_id:
+        pnd_enabled = False
+
+    normalized[CONF_PND_ENABLED] = pnd_enabled
+    normalized[CONF_PND_DEVICE_SET_ID] = pnd_device_set_id
+    normalized[CONF_PND_ID_ASSEMBLY] = pnd_id_assembly
+    normalized[CONF_PND_TARGET] = pnd_target
+    normalized[CONF_PND_UPDATE_INTERVAL_MIN] = pnd_update_interval_min
+    return normalized
 
 
 class CezDistribuceReadingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -209,7 +243,10 @@ class CezDistribuceOptionsFlow(config_entries.OptionsFlow):
     ):
         """Manage integration options."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            return self.async_create_entry(
+                title="",
+                data=_normalize_pnd_options(user_input),
+            )
 
         current_scan_interval = self._config_entry.options.get(
             CONF_SCAN_INTERVAL,
@@ -218,6 +255,29 @@ class CezDistribuceOptionsFlow(config_entries.OptionsFlow):
         current_detailed_history = self._config_entry.options.get(
             CONF_DETAILED_HISTORY,
             self._config_entry.data.get(CONF_DETAILED_HISTORY, True),
+        )
+        current_pnd_enabled = self._config_entry.options.get(
+            CONF_PND_ENABLED,
+            self._config_entry.data.get(CONF_PND_ENABLED, DEFAULT_PND_ENABLED),
+        )
+        current_pnd_device_set_id = self._config_entry.options.get(
+            CONF_PND_DEVICE_SET_ID,
+            self._config_entry.data.get(CONF_PND_DEVICE_SET_ID, DEFAULT_PND_DEVICE_SET_ID),
+        )
+        current_pnd_id_assembly = self._config_entry.options.get(
+            CONF_PND_ID_ASSEMBLY,
+            self._config_entry.data.get(CONF_PND_ID_ASSEMBLY, DEFAULT_PND_ID_ASSEMBLY),
+        )
+        current_pnd_target = self._config_entry.options.get(
+            CONF_PND_TARGET,
+            self._config_entry.data.get(CONF_PND_TARGET, DEFAULT_PND_TARGET),
+        )
+        current_pnd_update_interval_min = self._config_entry.options.get(
+            CONF_PND_UPDATE_INTERVAL_MIN,
+            self._config_entry.data.get(
+                CONF_PND_UPDATE_INTERVAL_MIN,
+                DEFAULT_PND_UPDATE_INTERVAL_MIN,
+            ),
         )
 
         data_schema = vol.Schema(
@@ -238,6 +298,49 @@ class CezDistribuceOptionsFlow(config_entries.OptionsFlow):
                     CONF_DETAILED_HISTORY,
                     default=current_detailed_history,
                 ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_PND_ENABLED,
+                    default=current_pnd_enabled,
+                ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_PND_DEVICE_SET_ID,
+                    default=current_pnd_device_set_id,
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.TEXT,
+                    )
+                ),
+                vol.Optional(
+                    CONF_PND_ID_ASSEMBLY,
+                    default=current_pnd_id_assembly,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-999999,
+                        max=999999,
+                        step=1,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_PND_TARGET,
+                    default=current_pnd_target,
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.TEXT,
+                    )
+                ),
+                vol.Optional(
+                    CONF_PND_UPDATE_INTERVAL_MIN,
+                    default=current_pnd_update_interval_min,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=MIN_PND_UPDATE_INTERVAL_MIN,
+                        max=1440,
+                        step=30,
+                        mode=selector.NumberSelectorMode.BOX,
+                        unit_of_measurement="min",
+                    )
+                ),
             }
         )
 

@@ -38,7 +38,19 @@
         "description": "Uprav parametry průběžné synchronizace.",
         "data": {
           "scan_interval": "Interval aktualizace",
-          "detailed_history": "Použít detailní historii odečtů"
+          "detailed_history": "Použít detailní historii odečtů",
+          "pnd_enabled": "Použít PND 15min data",
+          "pnd_device_set_id": "PND idDeviceSet",
+          "pnd_id_assembly": "PND idAssembly",
+          "pnd_target": "PND cílové uid nebo EAN",
+          "pnd_update_interval_min": "PND interval aktualizace"
+        },
+        "data_description": {
+          "pnd_enabled": "Zapne volitelné 15min PND načítání pro ručně zadané idDeviceSet.",
+          "pnd_device_set_id": "PND idDeviceSet najdete v požadavku PND dashboardu ČEZ Distribuce.",
+          "pnd_id_assembly": "Výchozí hodnota je obvykle -1001.",
+          "pnd_target": "Volitelně omezí PND jen na jedno odběrné místo podle uid nebo EAN. Pokud účet obsahuje více OM, je to doporučené.",
+          "pnd_update_interval_min": "PND interval určuje, jak často se budou 15min data stahovat. Doporučeno 60 minut nebo více."
         }
       }
     }
@@ -83,6 +95,24 @@
       },
       "refresh_health": {
         "name": "Stav komunikace integrace"
+      },
+      "pnd_spotreba_obdobi": {
+        "name": "PND spotřeba období"
+      },
+      "pnd_prumer_den": {
+        "name": "PND průměr za den"
+      },
+      "pnd_max_kw": {
+        "name": "PND maximum výkonu"
+      },
+      "pnd_posledni_kw": {
+        "name": "PND poslední výkon"
+      },
+      "pnd_posledni_mereni": {
+        "name": "PND poslední měření"
+      },
+      "pnd_health": {
+        "name": "PND stav"
       }
     }
   }
