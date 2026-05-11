@@ -279,8 +279,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return CezPndClient(
             username=self.client.username,
             password=self.client.password,
-            base_url=self.client.base_url,
-            client_id=self.client.client_id,
         )
 
     def _fetch_pnd_archive(self, now: datetime) -> dict[str, Any]:
