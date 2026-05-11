@@ -120,7 +120,7 @@ def extract_pnd_measurements(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract valid 15-minute measurements from a PND chart payload."""
     series = data.get("series")
     if not isinstance(series, list):
-        raise ValueError("Unexpected PND chart payload: missing series list")
+        raise ValueError("PND data response has unexpected shape: missing series")
 
     interval_duration = timedelta(hours=PND_INTERVAL_HOURS)
     measurements: list[dict[str, Any]] = []

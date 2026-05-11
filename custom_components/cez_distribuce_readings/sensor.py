@@ -486,6 +486,18 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
                 "pnd_json_path": archive.get("json_path"),
             }
 
+            if kind == "pnd_health":
+                attrs.update(
+                    {
+                        "pnd_last_attempt_at": status.get("last_attempt_at"),
+                        "pnd_last_success_at": status.get("last_success_at"),
+                        "pnd_warmup_status_code": status.get("warmup_status_code"),
+                        "pnd_warmup_url": status.get("warmup_url"),
+                        "pnd_data_status_code": status.get("data_status_code"),
+                        "pnd_data_url": status.get("data_url"),
+                    }
+                )
+
             if kind == "pnd_spotreba_obdobi" and isinstance(archive.get("daily_totals"), list):
                 attrs["daily_totals"] = archive.get("daily_totals")
 

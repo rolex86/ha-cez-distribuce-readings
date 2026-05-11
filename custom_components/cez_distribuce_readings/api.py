@@ -394,6 +394,18 @@ class CezDistribuceClient:
                 f"ČEZ portal returned non-JSON response from {response.url}"
             ) from err
 
+    def _decode_json_payload(
+        self,
+        response: requests.Response,
+        *,
+        not_json_error_message: str,
+    ) -> Any:
+        """Decode JSON payload with a custom detailed error message."""
+        try:
+            return response.json()
+        except ValueError as err:
+            raise CezDistribuceAuthError(not_json_error_message) from err
+
     def refresh_api_token(self) -> None:
         """Fetch and store X-Request-Token."""
         url = f"{self.base_url}/rest-auth-api?path=/token/get"
@@ -565,31 +577,53 @@ class CezDistribuceClient:
         url = f"{self.base_url}/prehled-om?path=supply-point-detail/signals/{ean}"
         return self._request_json("GET", url)
 
-    def warm_up_pnd_session(self) -> None:
+    def warm_up_pnd_session(self) -> dict[str, Any]:
         """Open the PND dashboard once to initialize PND cookies/session."""
         url = f"{PND_BASE_URL}/external/dashboard/view"
-        response = self._request(
-            "GET",
-            url,
-            headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Referer": "https://pnd.cezdistribuce.cz/",
-            },
-        )
+        _LOGGER.warning("PND warm-up start: %s", url)
+
+        try:
+            response = self._request(
+                "GET",
+                url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": "https://pnd.cezdistribuce.cz/",
+                },
+            )
+        except Exception as err:
+            raise CezDistribuceNetworkError(
+                f"PND warm-up request failed before response: {err.__class__.__name__}: {err}"
+            ) from err
+
         self._debug_response("ČEZ PND warm-up response", response)
+        _LOGGER.warning(
+            "PND warm-up response: status=%s url=%s",
+            response.status_code,
+            response.url,
+        )
 
         if response.status_code in (401, 403):
             raise CezDistribuceAuthError(
-                f"ČEZ PND warm-up failed with HTTP {response.status_code}"
+                f"PND warm-up auth failed: HTTP {response.status_code} at {response.url}"
             )
 
-        try:
-            response.raise_for_status()
-        except requests.RequestException as err:
-            raise CezDistribuceNetworkError("Unable to warm up ČEZ PND session") from err
-
         if self._is_login_page_response(response):
-            raise CezDistribuceAuthError("ČEZ PND warm-up ended on login page")
+            raise CezDistribuceAuthError(
+                f"PND warm-up ended on login page: HTTP {response.status_code} at {response.url}"
+            )
+
+        if response.status_code >= 400:
+            _LOGGER.warning(
+                "PND warm-up returned HTTP %s at %s, continuing with POST /external/data",
+                response.status_code,
+                response.url,
+            )
+
+        return {
+            "status_code": response.status_code,
+            "url": response.url,
+        }
 
     def get_pnd_chart_data(
         self,
@@ -597,9 +631,10 @@ class CezDistribuceClient:
         interval_from: str,
         interval_to: str,
         id_assembly: int = -1001,
-    ) -> Any:
+    ) -> tuple[Any, dict[str, Any]]:
         """Return PND chart payload for the selected device set."""
         url = f"{PND_BASE_URL}/external/data"
+        _LOGGER.warning("PND data POST start: %s", url)
 
         payload = {
             "format": "chart",
@@ -612,19 +647,75 @@ class CezDistribuceClient:
             "electrometerId": None,
         }
 
-        return self._request_json(
-            "POST",
-            url,
-            json=payload,
-            headers={
-                "Origin": "https://pnd.cezdistribuce.cz",
-                "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-            },
-            relogin_on_auth_failure=False,
-            invalid_json_as_auth_error=True,
+        try:
+            response = self._request(
+                "POST",
+                url,
+                json=payload,
+                headers={
+                    "Origin": "https://pnd.cezdistribuce.cz",
+                    "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                },
+            )
+        except Exception as err:
+            raise CezDistribuceNetworkError(
+                f"PND data request failed before response: {err.__class__.__name__}: {err}"
+            ) from err
+
+        self._debug_response("ČEZ PND data response", response)
+        _LOGGER.warning(
+            "PND data response: status=%s url=%s content_type=%s",
+            response.status_code,
+            response.url,
+            response.headers.get("content-type"),
         )
+
+        if response.status_code in (401, 403):
+            raise CezDistribuceAuthError(
+                f"PND data auth failed: HTTP {response.status_code} at {response.url}"
+            )
+
+        if self._is_login_page_response(response):
+            raise CezDistribuceAuthError(
+                f"PND data request ended on login page: HTTP {response.status_code} at {response.url}"
+            )
+
+        if response.status_code >= 400:
+            raise CezDistribuceNetworkError(
+                f"PND data request failed: HTTP {response.status_code} at {response.url}"
+            )
+
+        content_type = response.headers.get("content-type")
+        payload = self._decode_json_payload(
+            response,
+            not_json_error_message=(
+                "PND data response is not JSON: "
+                f"HTTP {response.status_code}, content-type={content_type}"
+            ),
+        )
+
+        if isinstance(payload, dict):
+            status_code = payload.get("statusCode")
+
+            if status_code in (401, 403):
+                raise CezDistribuceAuthError(
+                    f"PND data auth failed: statusCode {status_code} at {response.url}"
+                )
+
+            if status_code not in (None, 200):
+                raise CezDistribuceUnexpectedResponseError(
+                    f"PND data response returned statusCode={status_code}"
+                )
+
+            if "data" in payload:
+                payload = payload["data"]
+
+        return payload, {
+            "status_code": response.status_code,
+            "url": response.url,
+        }
 
     def get_signals_export_raw(self, ean: str) -> bytes:
         """Return raw signals export.

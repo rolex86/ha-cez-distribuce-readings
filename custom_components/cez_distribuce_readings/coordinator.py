@@ -158,10 +158,26 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._using_stale_data = False
         self._last_pnd_attempt: datetime | None = None
         self._last_pnd_fetch: datetime | None = None
+        self._last_pnd_success_at: datetime | None = None
         self._pnd_warmed_up = False
         self._pnd_login_generation = client.login_generation
         self._pnd_target_uids: set[str] = set()
         self._pnd_target_reason: str | None = None
+        self._last_pnd_warmup_status_code: int | None = None
+        self._last_pnd_warmup_url: str | None = None
+        self._last_pnd_data_status_code: int | None = None
+        self._last_pnd_data_url: str | None = None
+
+    def _pnd_diag_attributes(self) -> dict[str, Any]:
+        """Return compact diagnostics for the last PND attempt."""
+        return {
+            "last_attempt_at": _iso(self._last_pnd_attempt),
+            "last_success_at": _iso(self._last_pnd_success_at),
+            "warmup_status_code": self._last_pnd_warmup_status_code,
+            "warmup_url": self._last_pnd_warmup_url,
+            "data_status_code": self._last_pnd_data_status_code,
+            "data_url": self._last_pnd_data_url,
+        }
 
     def _build_pnd_status(
         self,
@@ -183,6 +199,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "error_detail": error_detail,
             "using_cached_data": using_cached_data,
             "skipped_reason": skipped_reason,
+            **self._pnd_diag_attributes(),
         }
 
     def _sync_pnd_warmup_state(self) -> None:
@@ -265,24 +282,39 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         interval_to = format_pnd_datetime(interval_end)
         last_error: Exception | None = None
         self._last_pnd_attempt = now
+        self._last_pnd_warmup_status_code = None
+        self._last_pnd_warmup_url = None
+        self._last_pnd_data_status_code = None
+        self._last_pnd_data_url = None
 
         for attempt in range(2):
             self._sync_pnd_warmup_state()
 
             try:
                 if not self._pnd_warmed_up:
-                    self.client.warm_up_pnd_session()
+                    warmup_info = self.client.warm_up_pnd_session()
+                    self._last_pnd_warmup_status_code = warmup_info.get("status_code")
+                    self._last_pnd_warmup_url = warmup_info.get("url")
                     self._pnd_warmed_up = True
                     self._pnd_login_generation = self.client.login_generation
 
-                payload = self.client.get_pnd_chart_data(
+                payload, data_info = self.client.get_pnd_chart_data(
                     id_device_set=self.pnd_device_set_id,
                     interval_from=interval_from,
                     interval_to=interval_to,
                     id_assembly=self.pnd_id_assembly,
                 )
+                self._last_pnd_data_status_code = data_info.get("status_code")
+                self._last_pnd_data_url = data_info.get("url")
                 archive = build_pnd_archive(payload, interval_from, interval_to)
                 self._last_pnd_fetch = now
+                self._last_pnd_success_at = now
+                _LOGGER.warning(
+                    "PND parser result: measurements_count=%s total_kwh=%s max_kw=%s",
+                    archive.get("measurements_count"),
+                    archive.get("total_kwh"),
+                    archive.get("max_kw"),
+                )
                 return archive
             except Exception as err:
                 last_error = err
@@ -693,6 +725,15 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 continue
 
+            using_cached = bool(fallback_pnd_archive)
+            _LOGGER.warning(
+                "PND fetch failed for uid=%s ean=%s: %s: %s; using_cached_data=%s",
+                uid,
+                ean,
+                type(shared_pnd_error).__name__ if shared_pnd_error else "UnknownError",
+                shared_pnd_error if shared_pnd_error else "Unknown error",
+                using_cached,
+            )
             pnd_archives_by_uid[uid] = fallback_pnd_archive
             pnd_status_by_uid[uid] = self._build_pnd_status(
                 enabled=True,
@@ -700,7 +741,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ok=False,
                 error_type=type(shared_pnd_error).__name__ if shared_pnd_error else "UnknownError",
                 error_detail=_short_error(shared_pnd_error) if shared_pnd_error else "Unknown error",
-                using_cached_data=bool(fallback_pnd_archive),
+                using_cached_data=using_cached,
             )
 
         return {
