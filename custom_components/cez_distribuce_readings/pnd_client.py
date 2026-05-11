@@ -243,6 +243,11 @@ class CezPndClient:
         self._session_cookie_count = 0
         self._debug_dir: Path | None = None
 
+    @property
+    def debug_dir(self) -> Path | None:
+        """Return the debug directory used by the last fetch attempt."""
+        return self._debug_dir
+
     def _request(
         self,
         session: requests.Session,
