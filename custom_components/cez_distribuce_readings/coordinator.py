@@ -27,7 +27,7 @@ from .pnd import (
     load_pnd_archive,
     save_pnd_archive,
 )
-from .pnd_client import CezPndClient
+from .pnd_client import CezPndClient, CezPndExternalScriptClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -276,6 +276,15 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _new_pnd_client(self) -> CezPndClient:
         """Create a fresh isolated PND-only client/session for one fetch cycle."""
+        external_script = Path(self.hass.config.path("pnd_probe_ha.py"))
+        if external_script.exists():
+            _LOGGER.warning("Using external PND probe script: %s", external_script)
+            return CezPndExternalScriptClient(
+                username=self.client.username,
+                password=self.client.password,
+                script_path=external_script,
+            )
+
         return CezPndClient(
             username=self.client.username,
             password=self.client.password,

@@ -35,8 +35,6 @@ from .const import (
 )
 from .coordinator import CezDistribuceCoordinator
 from .pnd import current_month_interval, format_pnd_datetime
-from .pnd_client import CezPndClient
-
 _LOGGER = logging.getLogger(__name__)
 _SERVICE_DEBUG_PND_FETCH = "debug_pnd_fetch"
 _ATTR_ENTRY_ID = "entry_id"
@@ -52,10 +50,7 @@ def _run_debug_pnd_fetch(
     entry_id: str,
 ) -> dict[str, object]:
     """Run one direct PND probe from the HA Core process."""
-    client = CezPndClient(
-        username=coordinator.client.username,
-        password=coordinator.client.password,
-    )
+    client = coordinator._new_pnd_client()
     interval_start, interval_end = current_month_interval(datetime.now())
     interval_from = format_pnd_datetime(interval_start)
     interval_to = format_pnd_datetime(interval_end)
@@ -70,6 +65,7 @@ def _run_debug_pnd_fetch(
     debug_dir.mkdir(parents=True, exist_ok=True)
     summary = {
         "entry_id": entry_id,
+        "client_type": type(client).__name__,
         "interval_from": interval_from,
         "interval_to": interval_to,
         "warmup_status_code": client.last_warmup_status_code,

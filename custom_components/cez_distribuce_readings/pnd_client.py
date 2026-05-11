@@ -13,6 +13,9 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
+import subprocess
+import sys
 import urllib.parse
 from datetime import datetime
 from html.parser import HTMLParser
@@ -510,3 +513,134 @@ class CezPndClient:
             )
         finally:
             session.close()
+
+
+class CezPndExternalScriptClient:
+    """Run the known-good external probe script and read back its JSON output."""
+
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        script_path: Path,
+    ) -> None:
+        self.username = username
+        self.password = password
+        self.script_path = Path(script_path)
+        self.last_warmup_status_code: int | None = None
+        self.last_warmup_url: str | None = None
+        self.last_data_status_code: int | None = None
+        self.last_data_url: str | None = None
+        self._debug_dir: Path | None = None
+
+    @property
+    def debug_dir(self) -> Path | None:
+        """Return the debug directory used by the last fetch attempt."""
+        return self._debug_dir
+
+    def _load_json_file(self, path: Path) -> dict[str, Any] | None:
+        """Read one JSON file into a dictionary."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+
+        return data if isinstance(data, dict) else None
+
+    def _latest_meta(self, suffix: str) -> dict[str, Any] | None:
+        """Return the newest meta dump matching the given suffix."""
+        if self._debug_dir is None:
+            return None
+
+        matches = sorted(self._debug_dir.glob(f"*_{suffix}.json"))
+        if not matches:
+            return None
+
+        return self._load_json_file(matches[-1])
+
+    def get_chart_data(
+        self,
+        id_device_set: str | int,
+        interval_from: str,
+        interval_to: str,
+        id_assembly: int = -1001,
+    ) -> Any:
+        """Execute the external probe script and return its parsed chart payload."""
+        self.last_warmup_status_code = None
+        self.last_warmup_url = None
+        self.last_data_status_code = None
+        self.last_data_url = None
+
+        if not self.script_path.exists():
+            raise CezDistribuceNetworkError(
+                f"External PND probe script not found: {self.script_path}"
+            )
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self._debug_dir = PND_DEBUG_DIR / f"external_probe_{stamp}"
+        self._debug_dir.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "CEZ_USER": self.username,
+                "CEZ_PASS": self.password,
+                "PND_DEVICE_SET": str(id_device_set),
+                "PND_ASSEMBLY": str(id_assembly),
+                "PND_FROM": interval_from,
+                "PND_TO": interval_to,
+                "PND_PROBE_OUT": str(self._debug_dir),
+            }
+        )
+
+        cmd = [sys.executable, str(self.script_path)]
+        _LOGGER.warning("Running external PND probe script: %s", cmd)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        if result.stdout.strip():
+            _LOGGER.warning("External PND probe stdout:\n%s", result.stdout.strip())
+        if result.stderr.strip():
+            _LOGGER.warning("External PND probe stderr:\n%s", result.stderr.strip())
+
+        warmup_meta = self._latest_meta("05_pnd_warmup")
+        data_meta = self._latest_meta("06_pnd_data")
+
+        if warmup_meta:
+            self.last_warmup_status_code = warmup_meta.get("status_code")
+            self.last_warmup_url = warmup_meta.get("final_url")
+        if data_meta:
+            self.last_data_status_code = data_meta.get("status_code")
+            self.last_data_url = data_meta.get("final_url")
+
+        if result.returncode != 0:
+            raise CezDistribuceNetworkError(
+                "External PND probe failed: "
+                f"exit={result.returncode} debug={self._debug_dir}"
+            )
+
+        if not data_meta:
+            raise CezDistribuceNetworkError(
+                f"External PND probe finished without 06_pnd_data.json dump in {self._debug_dir}"
+            )
+
+        body_path_value = data_meta.get("body_path")
+        if not isinstance(body_path_value, str) or not body_path_value:
+            raise CezDistribuceNetworkError(
+                f"External PND probe did not provide body_path in {self._debug_dir}"
+            )
+
+        body_path = Path(body_path_value)
+        try:
+            payload = json.loads(body_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            raise CezDistribuceNetworkError(
+                f"Unable to parse external PND probe JSON body from {body_path}"
+            ) from err
+
+        return payload
