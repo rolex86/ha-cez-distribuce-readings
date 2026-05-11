@@ -255,9 +255,33 @@ class CezPndClient:
         url: str,
         **kwargs: Any,
     ) -> requests.Response:
-        """Execute one request exactly through the local probe-style session."""
+        """Execute one request exactly through the local probe-style session.
+
+        Important: Home Assistant Core's HTTP stack can auto-advertise Brotli
+        (`br`) even when our session defaults do not. To match the working
+        standalone probe as closely as possible, force the final prepared
+        request header to `gzip, deflate` right before sending.
+        """
+        allow_redirects = kwargs.pop("allow_redirects", True)
+        request = requests.Request(method=method, url=url, **kwargs)
+
         try:
-            return session.request(method, url, timeout=TIMEOUT, **kwargs)
+            prepared = session.prepare_request(request)
+            prepared.headers["Accept-Encoding"] = "gzip, deflate"
+
+            send_kwargs = session.merge_environment_settings(
+                prepared.url,
+                {},
+                None,
+                None,
+                None,
+            )
+            return session.send(
+                prepared,
+                timeout=TIMEOUT,
+                allow_redirects=allow_redirects,
+                **send_kwargs,
+            )
         except requests.Timeout as err:
             raise CezDistribuceNetworkError(f"PND request timed out for {url}") from err
         except requests.RequestException as err:
