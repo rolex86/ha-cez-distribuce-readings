@@ -67,6 +67,7 @@ def _run_debug_pnd_fetch(
     )
 
     debug_dir = client.debug_dir or Path("/config/cez_distribuce_readings_debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
     summary = {
         "entry_id": entry_id,
         "interval_from": interval_from,
@@ -124,8 +125,15 @@ async def _async_handle_debug_pnd_fetch(hass: HomeAssistant, call: ServiceCall) 
     try:
         summary = await hass.async_add_executor_job(_run_debug_pnd_fetch, coordinator, resolved_entry_id)
     except Exception as err:
-        _LOGGER.warning("Temporary ČEZ PND debug fetch failed: %s: %s", type(err).__name__, err)
-        raise
+        _LOGGER.exception(
+            "Temporary ČEZ PND debug fetch failed. entry_id=%s error=%s: %s",
+            resolved_entry_id,
+            type(err).__name__,
+            err,
+        )
+        raise HomeAssistantError(
+            f"Temporary ČEZ PND debug fetch failed: {type(err).__name__}: {err}"
+        ) from err
 
     _LOGGER.warning(
         "Temporary ČEZ PND debug fetch finished. summary=%s",
