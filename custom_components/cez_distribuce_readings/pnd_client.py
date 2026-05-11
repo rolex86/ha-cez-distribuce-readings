@@ -21,7 +21,7 @@ from typing import Any
 
 import requests
 
-from .api import CezDistribuceAuthError, CezDistribuceNetworkError, CezDistribuceUnexpectedResponseError
+from .api import CezDistribuceAuthError, CezDistribuceNetworkError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,12 +49,10 @@ BROWSER_HEADERS = {
         "application/json,text/plain,*/*;q=0.8"
     ),
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
 }
 
 PND_WARMUP_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://pnd.cezdistribuce.cz/",
 }
 
@@ -62,7 +60,6 @@ PND_DATA_HEADERS = {
     "Origin": "https://pnd.cezdistribuce.cz",
     "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Encoding": "gzip, deflate",
     "Content-Type": "application/json",
 }
 
@@ -246,37 +243,16 @@ class CezPndClient:
         self._session_cookie_count = 0
         self._debug_dir: Path | None = None
 
-    def _merged_headers(
-        self,
-        session: requests.Session,
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, str]:
-        """Merge headers while forcing no Brotli advertising."""
-        merged = dict(session.headers)
-        if headers:
-            merged.update(headers)
-        # Force this last. Some environments add br by default when brotli is available.
-        merged["Accept-Encoding"] = "gzip, deflate"
-        return merged
-
     def _request(
         self,
         session: requests.Session,
         method: str,
         url: str,
-        *,
-        headers: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> requests.Response:
-        """Execute one request with probe-compatible headers."""
+        """Execute one request exactly through the local probe-style session."""
         try:
-            return session.request(
-                method,
-                url,
-                timeout=TIMEOUT,
-                headers=self._merged_headers(session, headers),
-                **kwargs,
-            )
+            return session.request(method, url, timeout=TIMEOUT, **kwargs)
         except requests.Timeout as err:
             raise CezDistribuceNetworkError(f"PND request timed out for {url}") from err
         except requests.RequestException as err:
@@ -359,7 +335,6 @@ class CezPndClient:
 
         session = requests.Session()
         session.max_redirects = 30
-        session.headers.clear()
         session.headers.update(BROWSER_HEADERS)
 
         service_url = (
@@ -441,8 +416,6 @@ class CezPndClient:
 
             if token:
                 session.headers.update({"X-Request-Token": token})
-                # Keep no-br forced even after changing session headers.
-                session.headers["Accept-Encoding"] = "gzip, deflate"
 
             # 5) PND warm-up. Keep probe behavior: dump response, but do not stop here.
             warmup_url = f"{PND_BASE_URL}/external/dashboard/view"
