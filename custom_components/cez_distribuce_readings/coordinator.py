@@ -138,6 +138,12 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=scan_interval,
         )
         self.client = client
+        self._pnd_client = CezDistribuceClient(
+            username=client.username,
+            password=client.password,
+            base_url=client.base_url,
+            client_id=client.client_id,
+        )
         self.detailed_history = detailed_history
         self.pnd_enabled = pnd_enabled
         self.pnd_device_set_id = (pnd_device_set_id or "").strip()
@@ -160,7 +166,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_pnd_fetch: datetime | None = None
         self._last_pnd_success_at: datetime | None = None
         self._pnd_warmed_up = False
-        self._pnd_login_generation = client.login_generation
+        self._pnd_login_generation = self._pnd_client.login_generation
         self._pnd_target_uids: set[str] = set()
         self._pnd_target_reason: str | None = None
         self._last_pnd_warmup_status_code: int | None = None
@@ -203,10 +209,10 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     def _sync_pnd_warmup_state(self) -> None:
-        """Drop PND warm-up state when the shared login session changes."""
-        if self.client.login_generation != self._pnd_login_generation:
+        """Drop PND warm-up state when the dedicated PND login session changes."""
+        if self._pnd_client.login_generation != self._pnd_login_generation:
             self._pnd_warmed_up = False
-            self._pnd_login_generation = self.client.login_generation
+            self._pnd_login_generation = self._pnd_client.login_generation
 
     def _pnd_fetch_due(self, now: datetime) -> bool:
         """Return true when the PND interval elapsed."""
@@ -276,7 +282,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def _fetch_pnd_archive(self, now: datetime) -> dict[str, Any]:
-        """Fetch one fresh PND archive using the shared authenticated session."""
+        """Fetch one fresh PND archive using an isolated authenticated PND session."""
         interval_start, interval_end = current_month_interval(now)
         interval_from = format_pnd_datetime(interval_start)
         interval_to = format_pnd_datetime(interval_end)
@@ -292,13 +298,13 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             try:
                 if not self._pnd_warmed_up:
-                    warmup_info = self.client.warm_up_pnd_session()
+                    warmup_info = self._pnd_client.warm_up_pnd_session()
                     self._last_pnd_warmup_status_code = warmup_info.get("status_code")
                     self._last_pnd_warmup_url = warmup_info.get("url")
                     self._pnd_warmed_up = True
-                    self._pnd_login_generation = self.client.login_generation
+                    self._pnd_login_generation = self._pnd_client.login_generation
 
-                payload, data_info = self.client.get_pnd_chart_data(
+                payload, data_info = self._pnd_client.get_pnd_chart_data(
                     id_device_set=self.pnd_device_set_id,
                     interval_from=interval_from,
                     interval_to=interval_to,
@@ -322,10 +328,10 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     break
 
                 _LOGGER.warning(
-                    "ČEZ PND fetch failed, forcing relogin and retry. error=%s",
+                    "ČEZ PND fetch failed in isolated PND session, forcing relogin and retry. error=%s",
                     err,
                 )
-                self.client.force_login()
+                self._pnd_client.force_login()
                 self._pnd_warmed_up = False
                 self._sync_pnd_warmup_state()
 
