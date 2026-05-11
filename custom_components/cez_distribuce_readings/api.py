@@ -33,6 +33,7 @@ PND_BROWSER_HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
 }
 _PND_DEBUG_DIR = Path("/config/cez_distribuce_readings_debug")
 

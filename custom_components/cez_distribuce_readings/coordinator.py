@@ -17,6 +17,7 @@ from .api import (
     CezDistribuceError,
     CezDistribuceNetworkError,
     CezDistribuceUnexpectedResponseError,
+    PND_BROWSER_HEADERS,
 )
 from .archive import build_archive, save_archive
 from .const import DOMAIN, MIN_PND_UPDATE_INTERVAL_MIN
@@ -275,12 +276,15 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _new_pnd_client(self) -> CezDistribuceClient:
         """Create a fresh isolated client/session for one PND fetch cycle."""
-        return CezDistribuceClient(
+        client = CezDistribuceClient(
             username=self.client.username,
             password=self.client.password,
             base_url=self.client.base_url,
             client_id=self.client.client_id,
         )
+        client.session.max_redirects = 30
+        client.session.headers.update(PND_BROWSER_HEADERS)
+        return client
 
     def _fetch_pnd_archive(self, now: datetime) -> dict[str, Any]:
         """Fetch one fresh PND archive using a brand new isolated PND session."""
