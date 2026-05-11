@@ -23,6 +23,14 @@ _LOGGER = logging.getLogger(__name__)
 
 TIMEOUT = 30
 LOGIN_RETRIES = 2
+PND_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
+}
 
 
 class CezDistribuceError(Exception):
@@ -587,6 +595,7 @@ class CezDistribuceClient:
                 "GET",
                 url,
                 headers={
+                    **PND_BROWSER_HEADERS,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Referer": "https://pnd.cezdistribuce.cz/",
                 },
@@ -653,6 +662,7 @@ class CezDistribuceClient:
                 url,
                 json=payload,
                 headers={
+                    **PND_BROWSER_HEADERS,
                     "Origin": "https://pnd.cezdistribuce.cz",
                     "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
                     "Accept": "application/json, text/plain, */*",

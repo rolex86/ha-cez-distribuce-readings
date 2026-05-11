@@ -130,7 +130,7 @@ PND_SENSORS: tuple[CezSensorDescription, ...] = (
         translation_key="pnd_spotreba_obdobi",
         kind="pnd_spotreba_obdobi",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.MEASUREMENT,
+        state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
     CezSensorDescription(
