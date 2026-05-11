@@ -298,16 +298,16 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for attempt in range(2):
             pnd_client = self._new_pnd_client()
             try:
-                payload, data_info = pnd_client.get_chart_data(
+                payload = pnd_client.get_chart_data(
                     id_device_set=self.pnd_device_set_id,
                     interval_from=interval_from,
                     interval_to=interval_to,
                     id_assembly=self.pnd_id_assembly,
                 )
-                self._last_pnd_warmup_status_code = data_info.get("warmup_status_code")
-                self._last_pnd_warmup_url = data_info.get("warmup_url")
-                self._last_pnd_data_status_code = data_info.get("data_status_code")
-                self._last_pnd_data_url = data_info.get("data_url")
+                self._last_pnd_warmup_status_code = pnd_client.last_warmup_status_code
+                self._last_pnd_warmup_url = pnd_client.last_warmup_url
+                self._last_pnd_data_status_code = pnd_client.last_data_status_code
+                self._last_pnd_data_url = pnd_client.last_data_url
                 archive = build_pnd_archive(payload, interval_from, interval_to)
                 self._last_pnd_fetch = now
                 self._last_pnd_success_at = now
