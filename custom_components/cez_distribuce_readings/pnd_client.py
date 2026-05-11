@@ -1,19 +1,11 @@
-"""Isolated PND client using the same flow as the verified HA probe.
+"""Standalone PND client using the exact proven pnd_probe_ha.py request flow.
 
-The PND portal is very sensitive to small differences in the login/OAuth flow.
-This client intentionally does not use the main CezDistribuceClient session or
-request helpers. Every PND fetch creates a brand new requests.Session and runs
-this exact sequence:
+This module is deliberately self-contained and does not use the main
+CezDistribuceClient session/helpers. The PND portal is sensitive to small
+request/session differences, so the flow below mirrors the working probe:
 
-1. CAS login page
-2. CAS login submit
-3. CAS authorize for the DIP portal
-4. DIP token request
-5. PND warm-up dashboard request
-6. PND data POST
-
-This mirrors the standalone /config/pnd_probe_ha.py test, but is self-contained
-inside the integration repository.
+fresh requests.Session -> CAS login -> CAS authorize -> token -> PND warm-up
+-> POST /external/data.
 """
 
 from __future__ import annotations
@@ -29,32 +21,22 @@ from typing import Any
 
 import requests
 
-from .api import (
-    CezDistribuceAuthError,
-    CezDistribuceNetworkError,
-    CezDistribuceUnexpectedResponseError,
-)
-from .const import (
-    CAS_BASE_URL,
-    CEZ_DISTRIBUCE_BASE_URL,
-    CEZ_DISTRIBUCE_CLIENT_ID,
-    CLIENT_NAME,
-    PND_BASE_URL,
-    RESPONSE_TYPE,
-    SCOPE,
-)
+from .api import CezDistribuceAuthError, CezDistribuceNetworkError, CezDistribuceUnexpectedResponseError
 
 _LOGGER = logging.getLogger(__name__)
 
+# Keep these constants local on purpose. They must match the working probe exactly
+# and must not be affected by any main ČEZ client configuration.
+CAS_BASE_URL = "https://cas.cez.cz/cas"
+CEZ_BASE_URL = "https://dip.cezdistribuce.cz/irj/portal"
+PND_BASE_URL = "https://pnd.cezdistribuce.cz/cezpnd2"
+CEZ_CLIENT_ID = "fjR3ZL9zrtsNcDQF.onpremise.dip.sap.dipcezdistribucecz.prod"
+CLIENT_NAME = "CasOAuthClient"
+RESPONSE_TYPE = "code"
+SCOPE = "openid"
+
 TIMEOUT = 30
 PND_DEBUG_DIR = Path("/config/cez_distribuce_readings_debug")
-
-# Keep these constants separate from the main client on purpose. The working
-# probe uses the public DIP portal URL and the DIP client id exactly like this.
-DIP_PORTAL_URL = CEZ_DISTRIBUCE_BASE_URL
-DIP_CLIENT_ID = CEZ_DISTRIBUCE_CLIENT_ID
-
-FORCED_ACCEPT_ENCODING = "gzip, deflate"
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -67,12 +49,12 @@ BROWSER_HEADERS = {
         "application/json,text/plain,*/*;q=0.8"
     ),
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
-    "Accept-Encoding": FORCED_ACCEPT_ENCODING,
+    "Accept-Encoding": "gzip, deflate",
 }
 
 PND_WARMUP_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Encoding": FORCED_ACCEPT_ENCODING,
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://pnd.cezdistribuce.cz/",
 }
 
@@ -80,13 +62,13 @@ PND_DATA_HEADERS = {
     "Origin": "https://pnd.cezdistribuce.cz",
     "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Encoding": FORCED_ACCEPT_ENCODING,
+    "Accept-Encoding": "gzip, deflate",
     "Content-Type": "application/json",
 }
 
 
 class LoginFormParser(HTMLParser):
-    """Tiny CAS login form parser used to avoid extra dependencies."""
+    """Extract the CAS login form in the same way as pnd_probe_ha.py."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -98,10 +80,7 @@ class LoginFormParser(HTMLParser):
         attrs = {key: value or "" for key, value in attrs_list}
 
         if tag.lower() == "form":
-            self.current_form = {
-                "action": attrs.get("action") or "",
-                "inputs": {},
-            }
+            self.current_form = {"action": attrs.get("action") or "", "inputs": {}}
             return
 
         if tag.lower() != "input":
@@ -164,20 +143,6 @@ def safe_headers(headers: Any) -> dict[str, str]:
     return result
 
 
-def looks_like_login_page(response: requests.Response) -> bool:
-    """Detect whether the response is still a CAS login page."""
-    url = response.url.lower()
-    if "cas.cez.cz" in url and "/login" in url:
-        return True
-
-    text = response.text[:5000].lower()
-    return (
-        'name="execution"' in text
-        or 'id="fm1"' in text
-        or "<title>login" in text
-    )
-
-
 def parse_login_form(
     html_text: str,
     login_url: str,
@@ -187,8 +152,8 @@ def parse_login_form(
     """Parse CAS login form exactly like the working probe."""
     parser = LoginFormParser()
     parser.feed(html_text)
-    selected_form: dict[str, Any] | None = None
 
+    selected_form: dict[str, Any] | None = None
     for form in parser.forms:
         inputs = form.get("inputs") or {}
         if "execution" in inputs:
@@ -197,16 +162,12 @@ def parse_login_form(
 
     if selected_form is None:
         if "execution" in parser.global_inputs:
-            selected_form = {
-                "action": login_url,
-                "inputs": parser.global_inputs,
-            }
+            selected_form = {"action": login_url, "inputs": parser.global_inputs}
         else:
             raise CezDistribuceAuthError("CAS login form does not contain execution token")
 
     action = html.unescape(str(selected_form.get("action") or login_url))
     form_action = urllib.parse.urljoin(login_url, action)
-
     payload = dict(selected_form.get("inputs") or {})
     payload.update(
         {
@@ -216,8 +177,17 @@ def parse_login_form(
             "geolocation": payload.get("geolocation", ""),
         }
     )
-
     return form_action, payload
+
+
+def looks_like_login_page(response: requests.Response) -> bool:
+    """Detect whether the response is still a CAS login page."""
+    url = response.url.lower()
+    if "cas.cez.cz" in url and "/login" in url:
+        return True
+
+    text = response.text[:5000].lower()
+    return 'name="execution"' in text or 'id="fm1"' in text or "<title>login" in text
 
 
 def extract_token(payload: Any) -> str | None:
@@ -256,7 +226,7 @@ def extract_token(payload: Any) -> str | None:
 
 
 class CezPndClient:
-    """One-shot PND client that creates a fresh requests session per fetch."""
+    """One-shot PND client, kept as close as possible to the working probe."""
 
     def __init__(
         self,
@@ -267,40 +237,44 @@ class CezPndClient:
     ) -> None:
         self.username = username
         self.password = password
-        # base_url/client_id are accepted for compatibility with old coordinator
-        # code, but deliberately ignored. The PND flow must match the working
-        # probe and use DIP_PORTAL_URL/DIP_CLIENT_ID exactly.
+        # base_url/client_id are intentionally ignored. The PND flow must use
+        # exactly the constants above, matching the successful probe.
         self.last_warmup_status_code: int | None = None
         self.last_warmup_url: str | None = None
         self.last_data_status_code: int | None = None
         self.last_data_url: str | None = None
+        self._session_cookie_count = 0
         self._debug_dir: Path | None = None
 
-    def _new_debug_dir(self) -> Path:
-        PND_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        debug_dir = PND_DEBUG_DIR / f"pnd_client_{stamp}"
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        self._debug_dir = debug_dir
-        return debug_dir
+    def _merged_headers(
+        self,
+        session: requests.Session,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Merge headers while forcing no Brotli advertising."""
+        merged = dict(session.headers)
+        if headers:
+            merged.update(headers)
+        # Force this last. Some environments add br by default when brotli is available.
+        merged["Accept-Encoding"] = "gzip, deflate"
+        return merged
 
     def _request(
         self,
         session: requests.Session,
         method: str,
         url: str,
+        *,
+        headers: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> requests.Response:
-        """Execute one request and force the same headers as the working probe."""
-        request_headers = dict(kwargs.pop("headers", {}) or {})
-        request_headers["Accept-Encoding"] = FORCED_ACCEPT_ENCODING
-
+        """Execute one request with probe-compatible headers."""
         try:
             return session.request(
                 method,
                 url,
                 timeout=TIMEOUT,
-                headers=request_headers,
+                headers=self._merged_headers(session, headers),
                 **kwargs,
             )
         except requests.Timeout as err:
@@ -315,11 +289,16 @@ class CezPndClient:
         kind: str,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        """Persist request/response diagnostics, masking secrets."""
+        """Persist request/response diagnostics for the current PND attempt."""
         try:
-            debug_dir = self._debug_dir or self._new_debug_dir()
+            if self._debug_dir is None:
+                PND_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                self._debug_dir = PND_DEBUG_DIR / f"pnd_client_{stamp}"
+                self._debug_dir.mkdir(parents=True, exist_ok=True)
+
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            base = debug_dir / f"{stamp}_{kind}"
+            base = self._debug_dir / f"{stamp}_{kind}"
             content_type = response.headers.get("content-type", "")
 
             meta = {
@@ -341,6 +320,8 @@ class CezPndClient:
                     "url": sanitize_url(response.request.url) if response.request else None,
                     "headers": safe_headers(response.request.headers) if response.request else {},
                 },
+                "session_cookie_count": self._session_cookie_count,
+                "response_cookie_count": len(response.cookies),
                 "response_headers": safe_headers(response.headers),
                 "body_preview": response.text[:3000],
                 "payload": payload,
@@ -356,11 +337,8 @@ class CezPndClient:
 
             body_path.write_bytes(response.content)
             meta["body_path"] = str(body_path)
-            meta_path.write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            _LOGGER.warning("PND debug dump saved: meta=%s body=%s", meta_path, body_path)
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            _LOGGER.warning("PND client debug dump saved: meta=%s body=%s", meta_path, body_path)
         except Exception as err:
             _LOGGER.warning("Unable to write PND debug dump for %s: %s", kind, err)
 
@@ -371,12 +349,13 @@ class CezPndClient:
         interval_to: str,
         id_assembly: int = -1001,
     ) -> Any:
-        """Fetch PND chart data using the verified standalone probe sequence."""
+        """Fetch PND chart data with the exact standalone probe sequence."""
         self.last_warmup_status_code = None
         self.last_warmup_url = None
         self.last_data_status_code = None
         self.last_data_url = None
-        debug_dir = self._new_debug_dir()
+        self._session_cookie_count = 0
+        self._debug_dir = None
 
         session = requests.Session()
         session.max_redirects = 30
@@ -385,26 +364,24 @@ class CezPndClient:
 
         service_url = (
             f"{CAS_BASE_URL}/oauth2.0/callbackAuthorize"
-            f"?client_id={DIP_CLIENT_ID}"
-            f"&redirect_uri={urllib.parse.quote(DIP_PORTAL_URL)}"
+            f"?client_id={CEZ_CLIENT_ID}"
+            f"&redirect_uri={urllib.parse.quote(CEZ_BASE_URL)}"
             f"&response_type={RESPONSE_TYPE}"
             f"&client_name={CLIENT_NAME}"
         )
-        login_url = (
-            f"{CAS_BASE_URL}/login"
-            f"?service={urllib.parse.quote(service_url)}"
-        )
+        login_url = f"{CAS_BASE_URL}/login?service={urllib.parse.quote(service_url)}"
         authorize_url = (
             f"{CAS_BASE_URL}/oidc/authorize"
             f"?scope={SCOPE}"
             f"&response_type={RESPONSE_TYPE}"
-            f"&redirect_uri={urllib.parse.quote(DIP_PORTAL_URL)}"
-            f"&client_id={DIP_CLIENT_ID}"
+            f"&redirect_uri={urllib.parse.quote(CEZ_BASE_URL)}"
+            f"&client_id={CEZ_CLIENT_ID}"
         )
 
-        _LOGGER.warning("PND standalone client start: debug_dir=%s", debug_dir)
-
         try:
+            _LOGGER.warning("PND standalone client start")
+
+            # 1) CAS login page
             response = self._request(session, "GET", login_url)
             try:
                 response.raise_for_status()
@@ -419,15 +396,13 @@ class CezPndClient:
                 self.password,
             )
 
+            # 2) CAS login submit
             response = self._request(
                 session,
                 "POST",
                 form_action,
                 data=form_payload,
-                headers={
-                    "Origin": "https://cas.cez.cz",
-                    "Referer": login_url,
-                },
+                headers={"Origin": "https://cas.cez.cz", "Referer": login_url},
             )
             if looks_like_login_page(response):
                 self._dump_response(response, kind="02_cas_login_submit_login_page")
@@ -438,6 +413,7 @@ class CezPndClient:
                     f"CAS login submit failed: HTTP {response.status_code} at {response.url}"
                 )
 
+            # 3) CAS authorize
             response = self._request(session, "GET", authorize_url)
             if looks_like_login_page(response):
                 self._dump_response(response, kind="03_cas_authorize_login_page")
@@ -448,7 +424,8 @@ class CezPndClient:
                     f"CAS authorize failed: HTTP {response.status_code} at {response.url}"
                 )
 
-            token_url = f"{DIP_PORTAL_URL}/rest-auth-api?path=/token/get"
+            # 4) ČEZ token
+            token_url = f"{CEZ_BASE_URL}/rest-auth-api?path=/token/get"
             response = self._request(session, "GET", token_url)
             if response.status_code >= 400:
                 self._dump_response(response, kind="04_cez_token_error")
@@ -456,32 +433,27 @@ class CezPndClient:
                     f"ČEZ token request failed: HTTP {response.status_code} at {response.url}"
                 )
 
+            token = None
             try:
                 token = extract_token(response.json())
-            except Exception:
-                token = None
+            except Exception as err:
+                _LOGGER.warning("PND standalone token JSON parse failed, continuing without token: %r", err)
 
             if token:
                 session.headers.update({"X-Request-Token": token})
+                # Keep no-br forced even after changing session headers.
+                session.headers["Accept-Encoding"] = "gzip, deflate"
 
+            # 5) PND warm-up. Keep probe behavior: dump response, but do not stop here.
             warmup_url = f"{PND_BASE_URL}/external/dashboard/view"
-            response = self._request(
-                session,
-                "GET",
-                warmup_url,
-                headers=PND_WARMUP_HEADERS,
-            )
+            response = self._request(session, "GET", warmup_url, headers=PND_WARMUP_HEADERS)
             self.last_warmup_status_code = response.status_code
             self.last_warmup_url = response.url
+            self._session_cookie_count = len(session.cookies)
             self._dump_response(response, kind="05_pnd_warmup")
+            _LOGGER.warning("PND warm-up response: status=%s url=%s", response.status_code, response.url)
 
-            # Match the standalone probe: do not fail immediately on a warm-up
-            # 500. The data POST below is the authoritative result.
-            if looks_like_login_page(response):
-                raise CezDistribuceAuthError(
-                    f"PND warm-up ended on login page: HTTP {response.status_code} at {response.url}"
-                )
-
+            # 6) PND data POST
             pnd_payload = {
                 "format": "chart",
                 "idAssembly": id_assembly,
@@ -502,31 +474,37 @@ class CezPndClient:
             )
             self.last_data_status_code = response.status_code
             self.last_data_url = response.url
+            self._session_cookie_count = len(session.cookies)
             self._dump_response(response, kind="06_pnd_data", payload=pnd_payload)
+            _LOGGER.warning(
+                "PND data response: status=%s url=%s content_type=%s",
+                response.status_code,
+                response.url,
+                response.headers.get("content-type"),
+            )
 
             content_type = (response.headers.get("content-type") or "").lower()
+            if response.status_code == 200 and "application/json" in content_type:
+                _LOGGER.warning(
+                    "PND standalone client success: warmup_status=%s data_status=%s debug_dir=%s",
+                    self.last_warmup_status_code,
+                    self.last_data_status_code,
+                    self._debug_dir,
+                )
+                return response.json()
 
             if looks_like_login_page(response):
                 raise CezDistribuceAuthError(
                     f"PND data request ended on login page: HTTP {response.status_code} at {response.url}"
                 )
 
-            if response.status_code == 200 and "application/json" in content_type:
-                _LOGGER.warning(
-                    "PND standalone client success: warmup_status=%s data_status=%s debug_dir=%s",
-                    self.last_warmup_status_code,
-                    self.last_data_status_code,
-                    debug_dir,
-                )
-                return response.json()
-
             if response.status_code in (401, 403):
                 raise CezDistribuceAuthError(
-                    f"PND data auth failed: HTTP {response.status_code} at {response.url}; debug={debug_dir}"
+                    f"PND data auth failed: HTTP {response.status_code} at {response.url}"
                 )
 
             raise CezDistribuceNetworkError(
-                f"PND data request failed: HTTP {response.status_code} at {response.url}; debug={debug_dir}"
+                f"PND data request failed: HTTP {response.status_code} at {response.url}; debug={self._debug_dir}"
             )
         finally:
             session.close()
