@@ -43,15 +43,18 @@ PND_SESSION_HEADERS = {
         "application/json,text/plain,*/*;q=0.8"
     ),
     "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
 }
 PND_WARMUP_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://pnd.cezdistribuce.cz/",
 }
 PND_DATA_HEADERS = {
     "Origin": "https://pnd.cezdistribuce.cz",
     "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
     "Accept": "application/json, text/plain, */*",
+    "Accept-Encoding": "gzip, deflate",
     "Content-Type": "application/json",
 }
 
@@ -134,8 +137,17 @@ class CezPndClient:
 
     def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """Execute one low-level request without reusing the main integration helpers."""
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers["Accept-Encoding"] = "gzip, deflate"
+
         try:
-            return self.session.request(method, url, timeout=TIMEOUT, **kwargs)
+            return self.session.request(
+                method,
+                url,
+                timeout=TIMEOUT,
+                headers=headers,
+                **kwargs,
+            )
         except requests.Timeout as err:
             raise CezDistribuceNetworkError(f"PND request timed out for {url}") from err
         except requests.RequestException as err:
