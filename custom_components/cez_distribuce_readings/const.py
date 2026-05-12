@@ -15,7 +15,6 @@ CONF_DETAILED_HISTORY = "detailed_history"
 CONF_PND_ENABLED = "pnd_enabled"
 CONF_PND_DEVICE_SET_ID = "pnd_device_set_id"
 CONF_PND_TARGET = "pnd_target"
-CONF_PND_ID_ASSEMBLY = "pnd_id_assembly"
 CONF_PND_UPDATE_INTERVAL_MIN = "pnd_update_interval_min"
 
 DEFAULT_SCAN_INTERVAL_MIN = 360
@@ -23,7 +22,6 @@ DEFAULT_SCAN_INTERVAL = timedelta(minutes=DEFAULT_SCAN_INTERVAL_MIN)
 DEFAULT_PND_ENABLED = False
 DEFAULT_PND_DEVICE_SET_ID = ""
 DEFAULT_PND_TARGET = ""
-DEFAULT_PND_ID_ASSEMBLY = -1001
 DEFAULT_PND_UPDATE_INTERVAL_MIN = 60
 MIN_PND_UPDATE_INTERVAL_MIN = 30
 
@@ -36,7 +34,6 @@ CEZ_DISTRIBUCE_CLIENT_ID = (
     "fjR3ZL9zrtsNcDQF.onpremise.dip.sap.dipcezdistribucecz.prod"
 )
 CEZ_DISTRIBUCE_BASE_URL = "https://dip.cezdistribuce.cz/irj/portal"
-PND_BASE_URL = "https://pnd.cezdistribuce.cz/cezpnd2"
 PND_INTERVAL_HOURS = 0.25
 
 PLATFORMS: list[Platform] = [

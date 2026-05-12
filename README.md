@@ -1,10 +1,10 @@
-# ČEZ Distribuce Readings
+# CEZ Distribuce Readings
 
-Home Assistant custom integration for reading electricity meter data from the ČEZ Distribuce portal.
+Home Assistant custom integration for reading electricity meter data from the CEZ Distribuce portal.
 
 ## Current features
 
-- Login to ČEZ Distribuce portal
+- Login to CEZ Distribuce portal
 - Reauthentication flow when credentials expire or change
 - Load supply points
 - Load meter reading history
@@ -30,7 +30,7 @@ Home Assistant custom integration for reading electricity meter data from the Č
 
 ## Notes
 
-This integration currently uses ČEZ Distribuce portal endpoints for:
+This integration currently uses CEZ Distribuce portal endpoints for:
 
 - monthly / control / billing meter readings
 - HDO / signal switching times
@@ -46,12 +46,11 @@ PND support is fully optional:
 When enabled in options:
 
 - `idDeviceSet` must be filled manually
-- the integration prefers a companion add-on export file when available
-- fallback direct PND fetching from the integration is still present for debugging/backward compatibility
-- a companion add-on can fetch PND outside Home Assistant Core and write a stable JSON export
+- the integration reads only the companion add-on export file
+- a companion add-on fetches PND outside Home Assistant Core and writes a stable JSON export
 - PND errors do not affect the main readings branch, HDO, or main `refresh_health`
 - the PND endpoint returns power in `kW`
-- energy is calculated from each valid 15-minute point as `kW × 0.25`
+- energy is calculated from each valid 15-minute point as `kW Ă— 0.25`
 - rows with invalid/unknown status are ignored
 - the full PND archive is saved only to JSON
 - Home Assistant attributes expose only small aggregates, not the full 15-minute dataset
@@ -59,13 +58,12 @@ When enabled in options:
 
 ## Recommended PND architecture
 
-For the most robust PND setup, use the companion add-on located in:
-
-`addon/cez_pnd_fetcher`
+For the most robust PND setup, use a separate companion add-on that writes the
+latest PND export into Home Assistant config storage.
 
 Why:
 
-- some ČEZ PND requests behave differently from Home Assistant Core than from a separate add-on/container runtime
+- some CEZ PND requests behave differently from Home Assistant Core than from a separate add-on/container runtime
 - the companion add-on writes the latest successful raw chart payload to:
   `/config/cez_distribuce_readings/pnd_export_<device_set_id>.json`
 - the integration then reads that export file and builds the normal PND sensors, archives and diagnostics from it
@@ -87,17 +85,7 @@ Optional PND settings in options:
 
 - enable/disable PND
 - `PND idDeviceSet`
-- `PND idAssembly` (default `-1001`)
 - `PND update interval` in minutes (minimum `30`, recommended `60` to `180`)
-
-## Companion add-on
-
-This repository now also contains a companion Home Assistant app scaffold in:
-
-`addon/cez_pnd_fetcher`
-
-It is intentionally kept in a separate top-level folder so it can later be moved
-to its own repository without changing the integration structure.
 
 ## Health and error visibility
 
@@ -127,12 +115,12 @@ The integration provides Home Assistant diagnostics (`diagnostics.py`) with:
 
 ## Installation via HACS
 
-1. HACS → Integrations → Custom repositories.
+1. HACS â†’ Integrations â†’ Custom repositories.
 2. Add this repository URL.
 3. Category: Integration.
-4. Install `ČEZ Distribuce Readings`.
+4. Install `CEZ Distribuce Readings`.
 5. Restart Home Assistant.
-6. Settings → Devices & services → Add integration → ČEZ Distribuce Readings.
+6. Settings â†’ Devices & services â†’ Add integration â†’ CEZ Distribuce Readings.
 
 ## Manual installation
 
@@ -144,3 +132,4 @@ to
 /config/custom_components/cez_distribuce_readings
 Then restart Home Assistant.
 ```
+

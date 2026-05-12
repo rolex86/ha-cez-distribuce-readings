@@ -20,14 +20,12 @@ from .const import (
     CONF_PASSWORD,
     CONF_PND_DEVICE_SET_ID,
     CONF_PND_ENABLED,
-    CONF_PND_ID_ASSEMBLY,
     CONF_PND_TARGET,
     CONF_PND_UPDATE_INTERVAL_MIN,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
     DEFAULT_PND_DEVICE_SET_ID,
     DEFAULT_PND_ENABLED,
-    DEFAULT_PND_ID_ASSEMBLY,
     DEFAULT_PND_TARGET,
     DEFAULT_PND_UPDATE_INTERVAL_MIN,
     DEFAULT_SCAN_INTERVAL_MIN,
@@ -43,7 +41,6 @@ def _normalize_pnd_options(user_input: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(user_input)
     pnd_device_set_id = str(normalized.get(CONF_PND_DEVICE_SET_ID) or "").strip()
     pnd_enabled = bool(normalized.get(CONF_PND_ENABLED, DEFAULT_PND_ENABLED))
-    pnd_id_assembly = int(normalized.get(CONF_PND_ID_ASSEMBLY, DEFAULT_PND_ID_ASSEMBLY))
     pnd_target = str(normalized.get(CONF_PND_TARGET, DEFAULT_PND_TARGET) or "").strip()
     pnd_update_interval_min = max(
         int(normalized.get(CONF_PND_UPDATE_INTERVAL_MIN, DEFAULT_PND_UPDATE_INTERVAL_MIN) or 0),
@@ -55,7 +52,6 @@ def _normalize_pnd_options(user_input: dict[str, Any]) -> dict[str, Any]:
 
     normalized[CONF_PND_ENABLED] = pnd_enabled
     normalized[CONF_PND_DEVICE_SET_ID] = pnd_device_set_id
-    normalized[CONF_PND_ID_ASSEMBLY] = pnd_id_assembly
     normalized[CONF_PND_TARGET] = pnd_target
     normalized[CONF_PND_UPDATE_INTERVAL_MIN] = pnd_update_interval_min
     return normalized
@@ -264,10 +260,6 @@ class CezDistribuceOptionsFlow(config_entries.OptionsFlow):
             CONF_PND_DEVICE_SET_ID,
             self._config_entry.data.get(CONF_PND_DEVICE_SET_ID, DEFAULT_PND_DEVICE_SET_ID),
         )
-        current_pnd_id_assembly = self._config_entry.options.get(
-            CONF_PND_ID_ASSEMBLY,
-            self._config_entry.data.get(CONF_PND_ID_ASSEMBLY, DEFAULT_PND_ID_ASSEMBLY),
-        )
         current_pnd_target = self._config_entry.options.get(
             CONF_PND_TARGET,
             self._config_entry.data.get(CONF_PND_TARGET, DEFAULT_PND_TARGET),
@@ -308,17 +300,6 @@ class CezDistribuceOptionsFlow(config_entries.OptionsFlow):
                 ): selector.TextSelector(
                     selector.TextSelectorConfig(
                         type=selector.TextSelectorType.TEXT,
-                    )
-                ),
-                vol.Optional(
-                    CONF_PND_ID_ASSEMBLY,
-                    default=current_pnd_id_assembly,
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=-999999,
-                        max=999999,
-                        step=1,
-                        mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
                 vol.Optional(

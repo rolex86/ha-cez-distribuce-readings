@@ -1,4 +1,4 @@
-"""Data coordinator for ČEZ Distribuce Readings."""
+"""Data coordinator for CEZ Distribuce Readings."""
 
 from __future__ import annotations
 
@@ -29,12 +29,11 @@ from .pnd import (
     load_pnd_archive,
     save_pnd_archive,
 )
-from .pnd_client import CezPndClient, CezPndExternalScriptClient
 
 _LOGGER = logging.getLogger(__name__)
 
 # When a refresh fails, keep the last good data and retry sooner than the normal
-# scan interval. With the default 6 hour scan interval this gives the ČEZ portal
+# scan interval. With the default 6 hour scan interval this gives the CEZ portal
 # a chance to recover without leaving the dashboard stale for half a day.
 _FAILURE_RETRY_INTERVALS = (
     timedelta(minutes=30),
@@ -61,7 +60,7 @@ def _short_error(error: Exception) -> str:
 
 
 def extract_supply_points(raw: Any) -> list[dict[str, Any]]:
-    """Extract supply point records from ČEZ portal response."""
+    """Extract supply point records from CEZ portal response."""
     points: list[dict[str, Any]] = []
 
     if isinstance(raw, dict):
@@ -120,7 +119,7 @@ def extract_ean(*sources: dict[str, Any] | None) -> str | None:
 
 
 class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordinator that fetches all ČEZ data in one executor job."""
+    """Coordinator that fetches all CEZ data in one executor job."""
 
     def __init__(
         self,
@@ -130,7 +129,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         detailed_history: bool,
         pnd_enabled: bool,
         pnd_device_set_id: str | None,
-        pnd_id_assembly: int,
         pnd_target: str | None,
         pnd_update_interval_min: int,
     ) -> None:
@@ -144,7 +142,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.detailed_history = detailed_history
         self.pnd_enabled = pnd_enabled
         self.pnd_device_set_id = (pnd_device_set_id or "").strip()
-        self.pnd_id_assembly = pnd_id_assembly
         self.pnd_target = (pnd_target or "").strip()
         self.pnd_update_interval = timedelta(
             minutes=max(pnd_update_interval_min, MIN_PND_UPDATE_INTERVAL_MIN)
@@ -160,10 +157,8 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_attempt_success: bool | None = None
         self._using_stale_data = False
         self._last_pnd_attempt: datetime | None = None
-        self._last_pnd_fetch: datetime | None = None
         self._last_pnd_success_at: datetime | None = None
         self._pnd_target_uids: set[str] = set()
-        self._pnd_target_reason: str | None = None
         self._last_pnd_warmup_status_code: int | None = None
         self._last_pnd_warmup_url: str | None = None
         self._last_pnd_data_status_code: int | None = None
@@ -236,7 +231,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return matched, None
 
             _LOGGER.warning(
-                "ČEZ PND target %s does not match any current supply point uid/ean",
+                "CEZ PND target %s does not match any current supply point uid/ean",
                 self.pnd_target,
             )
             return set(), "target_not_found"
@@ -245,7 +240,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {point_refs[0][0]}, None
 
         _LOGGER.warning(
-            "ČEZ PND is configured but the account has multiple supply points. "
+            "CEZ PND is configured but the account has multiple supply points. "
             "Set pnd_target to one uid/ean to enable PND entities."
         )
         return set(), "target_not_selected"
@@ -263,38 +258,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return uid.casefold() == target or (ean and ean.casefold() == target)
 
         return False
-
-    def _should_retry_pnd_after_relogin(self, error: Exception) -> bool:
-        """Return true when one relogin + warm-up retry should be attempted."""
-        if isinstance(error, CezDistribuceNetworkError):
-            text = str(error)
-            return (
-                "PND warm-up" in text
-                or "PND data request failed: HTTP 500" in text
-                or "PND data request failed: HTTP 502" in text
-                or "PND data request failed: HTTP 503" in text
-            )
-
-        return isinstance(
-            error,
-            (CezDistribuceAuthError, CezDistribuceUnexpectedResponseError, ValueError),
-        )
-
-    def _new_pnd_client(self) -> CezPndClient:
-        """Create a fresh isolated PND-only client/session for one fetch cycle."""
-        external_script = Path(self.hass.config.path("pnd_probe_ha.py"))
-        if external_script.exists():
-            _LOGGER.warning("Using external PND probe script: %s", external_script)
-            return CezPndExternalScriptClient(
-                username=self.client.username,
-                password=self.client.password,
-                script_path=external_script,
-            )
-
-        return CezPndClient(
-            username=self.client.username,
-            password=self.client.password,
-        )
 
     def _load_external_pnd_archive(
         self,
@@ -333,12 +296,11 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return archive
 
-    def _fetch_pnd_archive(self, now: datetime) -> dict[str, Any]:
-        """Fetch one fresh PND archive using a brand new isolated PND session."""
+    def _load_fresh_pnd_archive(self, now: datetime, archive_dir: Path) -> dict[str, Any]:
+        """Load one fresh PND archive from the companion add-on export."""
         interval_start, interval_end = current_month_interval(now)
         interval_from = format_pnd_datetime(interval_start)
         interval_to = format_pnd_datetime(interval_end)
-        last_error: Exception | None = None
         self._last_pnd_attempt = now
         self._last_pnd_warmup_status_code = None
         self._last_pnd_warmup_url = None
@@ -346,72 +308,31 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_pnd_data_url = None
         self._last_pnd_source = None
         self._last_pnd_export_path = None
-        archive_dir = Path(self.hass.config.path("cez_distribuce_readings"))
 
-        try:
-            external_archive = self._load_external_pnd_archive(
-                archive_dir,
-                interval_from,
-                interval_to,
+        export_data = load_external_pnd_export(archive_dir, self.pnd_device_set_id)
+        if not export_data:
+            expected_path = external_pnd_export_path(archive_dir, self.pnd_device_set_id)
+            raise CezDistribuceUnexpectedResponseError(
+                f"External PND export not found: {expected_path}"
             )
-        except Exception as err:
-            _LOGGER.warning("Unable to load external PND export, falling back to direct fetch: %s", err)
-        else:
-            if external_archive is not None:
-                self._last_pnd_fetch = now
-                self._last_pnd_success_at = now
-                _LOGGER.warning(
-                    "PND parser result: measurements_count=%s total_kwh=%s max_kw=%s source=%s",
-                    external_archive.get("measurements_count"),
-                    external_archive.get("total_kwh"),
-                    external_archive.get("max_kw"),
-                    self._last_pnd_source,
-                )
-                return external_archive
 
-        for attempt in range(2):
-            pnd_client = self._new_pnd_client()
-            try:
-                payload = pnd_client.get_chart_data(
-                    id_device_set=self.pnd_device_set_id,
-                    interval_from=interval_from,
-                    interval_to=interval_to,
-                    id_assembly=self.pnd_id_assembly,
-                )
-                self._last_pnd_warmup_status_code = pnd_client.last_warmup_status_code
-                self._last_pnd_warmup_url = pnd_client.last_warmup_url
-                self._last_pnd_data_status_code = pnd_client.last_data_status_code
-                self._last_pnd_data_url = pnd_client.last_data_url
-                self._last_pnd_source = type(pnd_client).__name__
-                archive = build_pnd_archive(payload, interval_from, interval_to)
-                archive["pnd_source"] = self._last_pnd_source
-                self._last_pnd_fetch = now
-                self._last_pnd_success_at = now
-                _LOGGER.warning(
-                    "PND parser result: measurements_count=%s total_kwh=%s max_kw=%s source=%s",
-                    archive.get("measurements_count"),
-                    archive.get("total_kwh"),
-                    archive.get("max_kw"),
-                    self._last_pnd_source,
-                )
-                return archive
-            except Exception as err:
-                self._last_pnd_warmup_status_code = pnd_client.last_warmup_status_code
-                self._last_pnd_warmup_url = pnd_client.last_warmup_url
-                self._last_pnd_data_status_code = pnd_client.last_data_status_code
-                self._last_pnd_data_url = pnd_client.last_data_url
-                self._last_pnd_source = type(pnd_client).__name__
-                last_error = err
-                if attempt >= 1 or not self._should_retry_pnd_after_relogin(err):
-                    break
+        archive = self._load_external_pnd_archive(
+            archive_dir,
+            interval_from,
+            interval_to,
+        )
+        if archive is None:
+            raise CezDistribuceUnexpectedResponseError("External PND export could not be loaded")
 
-                _LOGGER.warning(
-                    "ČEZ PND fetch failed in isolated probe-style session, retrying with a fresh session. error=%s",
-                    err,
-                )
-
-        assert last_error is not None
-        raise last_error
+        self._last_pnd_success_at = now
+        _LOGGER.warning(
+            "PND parser result: measurements_count=%s total_kwh=%s max_kw=%s source=%s",
+            archive.get("measurements_count"),
+            archive.get("total_kwh"),
+            archive.get("max_kw"),
+            self._last_pnd_source,
+        )
+        return archive
 
     def _set_failure_retry_interval(self) -> None:
         """Set a short retry interval after a failed refresh."""
@@ -425,7 +346,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if self.update_interval != new_interval:
             _LOGGER.warning(
-                "Adjusting ČEZ update interval after refresh failure. "
+                "Adjusting CEZ update interval after refresh failure. "
                 "failures=%s new_interval=%s base_interval=%s",
                 self._consecutive_failures,
                 new_interval,
@@ -436,7 +357,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _reset_failure_state(self) -> None:
         """Reset refresh error diagnostics after a fully successful refresh."""
         if self._consecutive_failures != 0:
-            _LOGGER.debug("Resetting ČEZ refresh failure state after successful refresh")
+            _LOGGER.debug("Resetting CEZ refresh failure state after successful refresh")
 
         self._consecutive_failures = 0
         self._last_error_type = None
@@ -504,7 +425,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from ČEZ portal.
+        """Fetch data from CEZ portal.
 
         Important behavior: once we have one successful dataset, later portal or
         authentication failures do not make entities unavailable. Instead, we
@@ -540,7 +461,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if partial_errors:
             self._record_partial_failure(partial_errors)
             _LOGGER.warning(
-                "ČEZ refresh completed with cached fallback data. failures=%s errors=%s",
+                "CEZ refresh completed with cached fallback data. failures=%s errors=%s",
                 self._consecutive_failures,
                 partial_errors,
             )
@@ -561,7 +482,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cached = self._stale_cached_data()
         if cached is not None:
             _LOGGER.warning(
-                "ČEZ refresh failed, keeping last good data. failures=%s type=%s error=%s",
+                "CEZ refresh failed, keeping last good data. failures=%s type=%s error=%s",
                 self._consecutive_failures,
                 error_type,
                 _short_error(error),
@@ -588,7 +509,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if not points and old_data.get("points"):
             raise CezDistribuceUnexpectedResponseError(
-                "ČEZ portal returned no supply points while cached supply points exist"
+                "CEZ portal returned no supply points while cached supply points exist"
             )
 
         readings_by_uid: dict[str, list[dict[str, Any]]] = {}
@@ -659,7 +580,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     archive.update(archive_paths)
                 except Exception as save_err:
                     _LOGGER.warning(
-                        "Unable to save ČEZ archive for uid=%s ean=%s, keeping in-memory archive: %s",
+                        "Unable to save CEZ archive for uid=%s ean=%s, keeping in-memory archive: %s",
                         uid,
                         ean,
                         save_err,
@@ -668,7 +589,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 archives_by_uid[uid] = archive
 
                 _LOGGER.debug(
-                    "ČEZ archive saved for uid=%s ean=%s readings=%s periods=%s",
+                    "CEZ archive saved for uid=%s ean=%s readings=%s periods=%s",
                     uid,
                     ean,
                     archive.get("readings_count"),
@@ -734,7 +655,6 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         target_uids, target_reason = self._resolve_pnd_target_uids(point_refs)
         self._pnd_target_uids = target_uids
-        self._pnd_target_reason = target_reason
 
         for uid, ean in point_refs:
             archive_key = ean or uid
@@ -779,7 +699,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if shared_pnd_archive is None and shared_pnd_error is None:
                 try:
-                    shared_pnd_archive = self._fetch_pnd_archive(pnd_now)
+                    shared_pnd_archive = self._load_fresh_pnd_archive(pnd_now, archive_dir)
                 except Exception as err:
                     shared_pnd_error = err
 
@@ -791,7 +711,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     archive.update(archive_paths)
                 except Exception as save_err:
                     _LOGGER.warning(
-                        "Unable to save ČEZ PND archive for uid=%s key=%s: %s",
+                        "Unable to save CEZ PND archive for uid=%s key=%s: %s",
                         uid,
                         archive_key,
                         save_err,
@@ -808,7 +728,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             using_cached = bool(fallback_pnd_archive)
             _LOGGER.warning(
-                "PND fetch failed for uid=%s ean=%s: %s: %s; using_cached_data=%s",
+                "PND export load failed for uid=%s ean=%s: %s: %s; using_cached_data=%s",
                 uid,
                 ean,
                 type(shared_pnd_error).__name__ if shared_pnd_error else "UnknownError",
@@ -835,3 +755,4 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "pnd_status_by_uid": pnd_status_by_uid,
             "_partial_refresh_errors": partial_errors,
         }
+

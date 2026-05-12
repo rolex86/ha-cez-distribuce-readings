@@ -1,12 +1,9 @@
-"""Small synchronous client for the ČEZ Distribuce portal."""
+"""Small synchronous client for the CEZ Distribuce portal."""
 
 from __future__ import annotations
 
-import json
 import logging
 import urllib.parse
-from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -17,7 +14,6 @@ from .const import (
     CEZ_DISTRIBUCE_BASE_URL,
     CEZ_DISTRIBUCE_CLIENT_ID,
     CLIENT_NAME,
-    PND_BASE_URL,
     RESPONSE_TYPE,
     SCOPE,
 )
@@ -26,20 +22,10 @@ _LOGGER = logging.getLogger(__name__)
 
 TIMEOUT = 30
 LOGIN_RETRIES = 2
-PND_BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
-}
-_PND_DEBUG_DIR = Path("/config/cez_distribuce_readings_debug")
 
 
 class CezDistribuceError(Exception):
-    """Base ČEZ Distribuce API error."""
+    """Base CEZ Distribuce API error."""
 
 
 class CezDistribuceAuthError(CezDistribuceError):
@@ -120,83 +106,10 @@ class CezDistribuceClient:
             [(item.status_code, item.url) for item in response.history],
         )
 
-    def _sanitize_headers(self, headers: Any) -> dict[str, str]:
-        """Return request/response headers without secrets."""
-        sanitized: dict[str, str] = {}
-
-        if not headers:
-            return sanitized
-
-        for key, value in dict(headers).items():
-            if str(key).lower() in {"cookie", "authorization"}:
-                continue
-            sanitized[str(key)] = str(value)
-
-        return sanitized
-
-    def _dump_pnd_debug_response(
-        self,
-        kind: str,
-        response: requests.Response,
-        *,
-        payload: Any | None = None,
-    ) -> dict[str, str] | None:
-        """Persist a detailed PND debug dump for failed HTTP responses."""
-        try:
-            _PND_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            slug = kind.replace(" ", "_").replace("/", "_")
-            base_name = f"{stamp}_{slug}"
-            meta_path = _PND_DEBUG_DIR / f"{base_name}.json"
-            body_path = _PND_DEBUG_DIR / f"{base_name}.html"
-
-            body_text = response.text
-            request = response.request
-            debug_payload: dict[str, Any] = {
-                "captured_at": datetime.now().isoformat(),
-                "kind": kind,
-                "status_code": response.status_code,
-                "final_url": response.url,
-                "redirect_history": [
-                    {
-                        "status_code": item.status_code,
-                        "url": item.url,
-                        "location": item.headers.get("location"),
-                    }
-                    for item in response.history
-                ],
-                "request": {
-                    "method": request.method,
-                    "url": request.url,
-                    "headers": self._sanitize_headers(request.headers),
-                },
-                "session_cookie_count": len(self.session.cookies),
-                "response_cookie_count": len(response.cookies),
-                "response_headers": self._sanitize_headers(response.headers),
-                "body_preview": body_text[:3000],
-                "body_path": str(body_path),
-            }
-
-            if payload is not None:
-                debug_payload["payload"] = payload
-
-            meta_path.write_text(
-                json.dumps(debug_payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            body_path.write_bytes(response.content)
-            return {
-                "meta_path": str(meta_path),
-                "body_path": str(body_path),
-            }
-        except Exception as err:
-            _LOGGER.warning("Unable to write PND debug dump for %s: %s", kind, err)
-            return None
-
     def _is_expected_oauth_redirect_404(self, response: requests.Response) -> bool:
         """Return true when CAS ended on the expected portal callback URL.
 
-        ČEZ CAS can redirect to:
+        CEZ CAS can redirect to:
         https://dip.cezdistribuce.cz/irj/portal?code=...
 
         In a browser this continues inside the portal. In requests, the final
@@ -293,9 +206,9 @@ class CezDistribuceClient:
         try:
             return self.session.request(method, url, timeout=TIMEOUT, **kwargs)
         except requests.Timeout as err:
-            raise CezDistribuceNetworkError(f"ČEZ request timed out for {url}") from err
+            raise CezDistribuceNetworkError(f"CEZ request timed out for {url}") from err
         except requests.RequestException as err:
-            raise CezDistribuceNetworkError(f"ČEZ request failed for {url}") from err
+            raise CezDistribuceNetworkError(f"CEZ request failed for {url}") from err
 
     def _request(
         self,
@@ -329,7 +242,7 @@ class CezDistribuceClient:
 
     def login(self) -> None:
         """Login and refresh portal X-Request-Token."""
-        _LOGGER.debug("Logging in to ČEZ Distribuce portal")
+        _LOGGER.debug("Logging in to CEZ Distribuce portal")
 
         response = self._request_with_network_errors("GET", self.login_url)
         self._debug_response("CAS login page response", response)
@@ -380,11 +293,11 @@ class CezDistribuceClient:
         self.refresh_api_token()
         self._logged_in = True
         self._login_generation += 1
-        _LOGGER.debug("ČEZ Distribuce login completed successfully")
+        _LOGGER.debug("CEZ Distribuce login completed successfully")
 
     def force_login(self) -> None:
         """Force a clean login after the portal returned an expired-session page."""
-        _LOGGER.debug("Forcing fresh ČEZ Distribuce login")
+        _LOGGER.debug("Forcing fresh CEZ Distribuce login")
         self._reset_session()
         self.login()
 
@@ -394,7 +307,7 @@ class CezDistribuceClient:
             self.login()
 
     def _extract_token_from_payload(self, payload: Any) -> str | None:
-        """Extract X-Request-Token from possible ČEZ token payload shapes."""
+        """Extract X-Request-Token from possible CEZ token payload shapes."""
         if isinstance(payload, str):
             token = payload.strip()
             return token or None
@@ -430,7 +343,7 @@ class CezDistribuceClient:
     def _looks_like_html(self, response: requests.Response) -> bool:
         """Return true when the portal returned HTML instead of JSON.
 
-        This usually means the ČEZ portal session expired and the request was
+        This usually means the CEZ portal session expired and the request was
         redirected to a portal shell/login-like HTML page, even with HTTP 200.
         """
         content_type = (response.headers.get("content-type") or "").lower()
@@ -451,7 +364,7 @@ class CezDistribuceClient:
         """Decode JSON or raise an auth error when HTML was returned."""
         if self._looks_like_html(response):
             _LOGGER.warning(
-                "%s returned HTML instead of JSON. Treating it as expired ČEZ session. "
+                "%s returned HTML instead of JSON. Treating it as expired CEZ session. "
                 "status=%s url=%s content_type=%s body_start=%r",
                 label,
                 response.status_code,
@@ -459,7 +372,7 @@ class CezDistribuceClient:
                 response.headers.get("content-type"),
                 response.text[:1000],
             )
-            raise CezDistribuceAuthError("ČEZ portal returned HTML instead of JSON")
+            raise CezDistribuceAuthError("CEZ portal returned HTML instead of JSON")
 
         try:
             return response.json()
@@ -474,10 +387,10 @@ class CezDistribuceClient:
             )
             if invalid_json_as_auth_error:
                 raise CezDistribuceAuthError(
-                    f"ČEZ portal returned non-JSON response from {response.url}"
+                    f"CEZ portal returned non-JSON response from {response.url}"
                 ) from err
             raise CezDistribuceError(
-                f"ČEZ portal returned non-JSON response from {response.url}"
+                f"CEZ portal returned non-JSON response from {response.url}"
             ) from err
 
     def _decode_json_payload(
@@ -496,25 +409,25 @@ class CezDistribuceClient:
         """Fetch and store X-Request-Token."""
         url = f"{self.base_url}/rest-auth-api?path=/token/get"
         response = self._request_with_network_errors("GET", url)
-        self._debug_response("ČEZ token response", response)
+        self._debug_response("CEZ token response", response)
         try:
             response.raise_for_status()
         except requests.RequestException as err:
-            raise CezDistribuceNetworkError("Unable to fetch ČEZ API token") from err
+            raise CezDistribuceNetworkError("Unable to fetch CEZ API token") from err
 
-        payload = self._json_or_auth_error(response, "ČEZ token response")
+        payload = self._json_or_auth_error(response, "CEZ token response")
         token = self._extract_token_from_payload(payload)
 
         if not token:
             _LOGGER.error(
-                "Unexpected ČEZ token payload shape. type=%s keys=%s",
+                "Unexpected CEZ token payload shape. type=%s keys=%s",
                 type(payload).__name__,
                 list(payload.keys()) if isinstance(payload, dict) else None,
             )
             raise CezDistribuceAuthError("Unable to fetch X-Request-Token")
 
         self.session.headers.update({"X-Request-Token": token})
-        _LOGGER.debug("ČEZ X-Request-Token loaded successfully")
+        _LOGGER.debug("CEZ X-Request-Token loaded successfully")
 
     def _request_json(
         self,
@@ -525,21 +438,21 @@ class CezDistribuceClient:
         invalid_json_as_auth_error: bool = False,
         **kwargs: Any,
     ) -> Any:
-        """Call portal JSON endpoint and unwrap ČEZ response envelope."""
+        """Call portal JSON endpoint and unwrap CEZ response envelope."""
         self.ensure_logged_in()
 
         last_error: Exception | None = None
 
         for attempt in range(LOGIN_RETRIES):
             _LOGGER.debug(
-                "ČEZ request attempt=%s method=%s url=%s",
+                "CEZ request attempt=%s method=%s url=%s",
                 attempt + 1,
                 method,
                 url,
             )
 
             response = self._request_with_network_errors(method, url, **kwargs)
-            self._debug_response("ČEZ JSON response", response)
+            self._debug_response("CEZ JSON response", response)
 
             if response.status_code in (401, 403):
                 _LOGGER.debug(
@@ -548,7 +461,7 @@ class CezDistribuceClient:
                 )
                 if not relogin_on_auth_failure:
                     raise CezDistribuceAuthError(
-                        f"ČEZ endpoint returned HTTP {response.status_code} for {url}"
+                        f"CEZ endpoint returned HTTP {response.status_code} for {url}"
                     )
                 self.force_login()
                 continue
@@ -557,13 +470,13 @@ class CezDistribuceClient:
                 response.raise_for_status()
             except requests.RequestException as err:
                 raise CezDistribuceNetworkError(
-                    f"ČEZ endpoint returned HTTP error for {url}"
+                    f"CEZ endpoint returned HTTP error for {url}"
                 ) from err
 
             try:
                 payload = self._json_or_auth_error(
                     response,
-                    "ČEZ JSON response",
+                    "CEZ JSON response",
                     invalid_json_as_auth_error=invalid_json_as_auth_error,
                 )
             except CezDistribuceAuthError as err:
@@ -572,13 +485,13 @@ class CezDistribuceClient:
                     break
 
                 _LOGGER.debug(
-                    "ČEZ returned non-JSON/HTML response, forcing relogin and retry"
+                    "CEZ returned non-JSON/HTML response, forcing relogin and retry"
                 )
                 self.force_login()
                 continue
 
             _LOGGER.debug(
-                "ČEZ JSON payload received. type=%s keys=%s",
+                "CEZ JSON payload received. type=%s keys=%s",
                 type(payload).__name__,
                 list(payload.keys()) if isinstance(payload, dict) else None,
             )
@@ -593,15 +506,15 @@ class CezDistribuceClient:
                     )
                     if not relogin_on_auth_failure:
                         raise CezDistribuceAuthError(
-                            f"ČEZ portal returned statusCode={status_code}"
+                            f"CEZ portal returned statusCode={status_code}"
                         )
                     self.force_login()
                     continue
 
                 if status_code not in (None, 200):
-                    _LOGGER.error("ČEZ portal returned error payload=%r", payload)
+                    _LOGGER.error("CEZ portal returned error payload=%r", payload)
                     raise CezDistribuceUnexpectedResponseError(
-                        f"ČEZ portal returned statusCode={status_code}: {payload}"
+                        f"CEZ portal returned statusCode={status_code}: {payload}"
                     )
 
                 if "data" in payload:
@@ -663,172 +576,6 @@ class CezDistribuceClient:
         url = f"{self.base_url}/prehled-om?path=supply-point-detail/signals/{ean}"
         return self._request_json("GET", url)
 
-    def warm_up_pnd_session(self) -> dict[str, Any]:
-        """Open the PND dashboard once to initialize PND cookies/session."""
-        url = f"{PND_BASE_URL}/external/dashboard/view"
-        _LOGGER.warning("PND warm-up start: %s", url)
-
-        try:
-            response = self._request(
-                "GET",
-                url,
-                headers={
-                    **PND_BROWSER_HEADERS,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Referer": "https://pnd.cezdistribuce.cz/",
-                },
-            )
-        except Exception as err:
-            raise CezDistribuceNetworkError(
-                f"PND warm-up request failed before response: {err.__class__.__name__}: {err}"
-            ) from err
-
-        self._debug_response("ČEZ PND warm-up response", response)
-        _LOGGER.warning(
-            "PND warm-up response: status=%s url=%s",
-            response.status_code,
-            response.url,
-        )
-
-        dump_paths: dict[str, str] | None = None
-        if response.status_code >= 400:
-            dump_paths = self._dump_pnd_debug_response("pnd_warmup", response)
-            if dump_paths:
-                _LOGGER.warning(
-                    "PND warm-up debug dump saved: meta=%s body=%s",
-                    dump_paths["meta_path"],
-                    dump_paths["body_path"],
-                )
-
-        if response.status_code in (401, 403):
-            raise CezDistribuceAuthError(
-                f"PND warm-up auth failed: HTTP {response.status_code} at {response.url}"
-            )
-
-        if self._is_login_page_response(response):
-            raise CezDistribuceAuthError(
-                f"PND warm-up ended on login page: HTTP {response.status_code} at {response.url}"
-            )
-
-        if response.status_code >= 400:
-            _LOGGER.warning(
-                "PND warm-up returned HTTP %s at %s, continuing with POST /external/data",
-                response.status_code,
-                response.url,
-            )
-
-        return {
-            "status_code": response.status_code,
-            "url": response.url,
-        }
-
-    def get_pnd_chart_data(
-        self,
-        id_device_set: str | int,
-        interval_from: str,
-        interval_to: str,
-        id_assembly: int = -1001,
-    ) -> tuple[Any, dict[str, Any]]:
-        """Return PND chart payload for the selected device set."""
-        url = f"{PND_BASE_URL}/external/data"
-        _LOGGER.warning("PND data POST start: %s", url)
-
-        payload = {
-            "format": "chart",
-            "idAssembly": id_assembly,
-            "idDeviceSet": str(id_device_set),
-            "intervalFrom": interval_from,
-            "intervalTo": interval_to,
-            "compareFrom": None,
-            "opmId": None,
-            "electrometerId": None,
-        }
-
-        try:
-            response = self._request(
-                "POST",
-                url,
-                json=payload,
-                headers={
-                    **PND_BROWSER_HEADERS,
-                    "Origin": "https://pnd.cezdistribuce.cz",
-                    "Referer": "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view",
-                    "Accept": "application/json, text/plain, */*",
-                    "Content-Type": "application/json",
-                },
-            )
-        except Exception as err:
-            raise CezDistribuceNetworkError(
-                f"PND data request failed before response: {err.__class__.__name__}: {err}"
-            ) from err
-
-        self._debug_response("ČEZ PND data response", response)
-        _LOGGER.warning(
-            "PND data response: status=%s url=%s content_type=%s",
-            response.status_code,
-            response.url,
-            response.headers.get("content-type"),
-        )
-
-        dump_paths: dict[str, str] | None = None
-        if response.status_code >= 400:
-            dump_paths = self._dump_pnd_debug_response(
-                "pnd_data",
-                response,
-                payload=payload,
-            )
-            if dump_paths:
-                _LOGGER.warning(
-                    "PND data debug dump saved: meta=%s body=%s",
-                    dump_paths["meta_path"],
-                    dump_paths["body_path"],
-                )
-
-        if response.status_code in (401, 403):
-            raise CezDistribuceAuthError(
-                f"PND data auth failed: HTTP {response.status_code} at {response.url}"
-            )
-
-        if self._is_login_page_response(response):
-            raise CezDistribuceAuthError(
-                f"PND data request ended on login page: HTTP {response.status_code} at {response.url}"
-            )
-
-        if response.status_code >= 400:
-            raise CezDistribuceNetworkError(
-                f"PND data request failed: HTTP {response.status_code} at {response.url}"
-            )
-
-        content_type = response.headers.get("content-type")
-        payload = self._decode_json_payload(
-            response,
-            not_json_error_message=(
-                "PND data response is not JSON: "
-                f"HTTP {response.status_code}, content-type={content_type}"
-            ),
-        )
-
-        if isinstance(payload, dict):
-            status_code = payload.get("statusCode")
-
-            if status_code in (401, 403):
-                raise CezDistribuceAuthError(
-                    f"PND data auth failed: statusCode {status_code} at {response.url}"
-                )
-
-            if status_code not in (None, 200):
-                raise CezDistribuceUnexpectedResponseError(
-                    f"PND data response returned statusCode={status_code}"
-                )
-
-            if "data" in payload:
-                payload = payload["data"]
-
-        return payload, {
-            "status_code": response.status_code,
-            "url": response.url,
-        }
-
     def get_signals_export_raw(self, ean: str) -> bytes:
         """Return raw signals export.
 
@@ -843,9 +590,10 @@ class CezDistribuceClient:
         )
 
         response = self._request_with_network_errors("GET", url)
-        self._debug_response("ČEZ signals export response", response)
+        self._debug_response("CEZ signals export response", response)
         try:
             response.raise_for_status()
         except requests.RequestException as err:
             raise CezDistribuceNetworkError("Unable to download signals export") from err
         return response.content
+
