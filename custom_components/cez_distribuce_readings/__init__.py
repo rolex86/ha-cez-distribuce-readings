@@ -34,7 +34,6 @@ from .const import (
     PLATFORMS,
 )
 from .coordinator import CezDistribuceCoordinator
-from .pnd import current_month_interval, format_pnd_datetime
 _LOGGER = logging.getLogger(__name__)
 _SERVICE_DEBUG_PND_FETCH = "debug_pnd_fetch"
 _ATTR_ENTRY_ID = "entry_id"
@@ -50,35 +49,31 @@ def _run_debug_pnd_fetch(
     entry_id: str,
 ) -> dict[str, object]:
     """Run one direct PND probe from the HA Core process."""
-    client = coordinator._new_pnd_client()
-    interval_start, interval_end = current_month_interval(datetime.now())
-    interval_from = format_pnd_datetime(interval_start)
-    interval_to = format_pnd_datetime(interval_end)
-    payload = client.get_chart_data(
-        id_device_set=coordinator.pnd_device_set_id,
-        id_assembly=coordinator.pnd_id_assembly,
-        interval_from=interval_from,
-        interval_to=interval_to,
+    archive = coordinator._fetch_pnd_archive(datetime.now())
+    diag = coordinator._pnd_diag_attributes()
+    debug_dir = Path(
+        str(diag.get("export_path") or Path("/config/cez_distribuce_readings_debug"))
     )
-
-    debug_dir = client.debug_dir or Path("/config/cez_distribuce_readings_debug")
+    if debug_dir.is_file():
+        debug_dir = debug_dir.parent
     debug_dir.mkdir(parents=True, exist_ok=True)
     summary = {
         "entry_id": entry_id,
-        "client_type": type(client).__name__,
-        "interval_from": interval_from,
-        "interval_to": interval_to,
-        "warmup_status_code": client.last_warmup_status_code,
-        "warmup_url": client.last_warmup_url,
-        "data_status_code": client.last_data_status_code,
-        "data_url": client.last_data_url,
-        "payload_type": type(payload).__name__,
+        "client_type": diag.get("source"),
+        "interval_from": archive.get("interval_from"),
+        "interval_to": archive.get("interval_to"),
+        "warmup_status_code": diag.get("warmup_status_code"),
+        "warmup_url": diag.get("warmup_url"),
+        "data_status_code": diag.get("data_status_code"),
+        "data_url": diag.get("data_url"),
+        "payload_type": "archive",
         "debug_dir": str(debug_dir),
     }
-    if isinstance(payload, dict):
-        summary["payload_keys"] = list(payload.keys())[:20]
-        summary["unitY"] = payload.get("unitY")
-        summary["series_count"] = len(payload.get("series") or []) if isinstance(payload.get("series"), list) else None
+    if isinstance(archive, dict):
+        summary["payload_keys"] = list(archive.keys())[:20]
+        summary["unitY"] = archive.get("unit_y")
+        summary["measurements_count"] = archive.get("measurements_count")
+        summary["total_kwh"] = archive.get("total_kwh")
 
     summary_path = debug_dir / "service_debug_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

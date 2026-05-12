@@ -9,6 +9,7 @@ Home Assistant custom integration for reading electricity meter data from the Č
 - Load supply points
 - Load meter reading history
 - Optional 15-minute PND data branch with a separate refresh interval
+- Optional companion add-on for robust PND export outside Home Assistant Core
 - Adaptive retries, relogin, and refresh backoff on repeated failures
 - Options flow (change update interval, detailed history, and optional PND settings without removing integration)
 - Create sensors for:
@@ -45,9 +46,9 @@ PND support is fully optional:
 When enabled in options:
 
 - `idDeviceSet` must be filled manually
-- PND uses the same authenticated session as the main integration
-- a PND warm-up request is done before the first PND fetch after startup/relogin
-- on PND auth/session problems the integration performs re-login and one retry
+- the integration prefers a companion add-on export file when available
+- fallback direct PND fetching from the integration is still present for debugging/backward compatibility
+- a companion add-on can fetch PND outside Home Assistant Core and write a stable JSON export
 - PND errors do not affect the main readings branch, HDO, or main `refresh_health`
 - the PND endpoint returns power in `kW`
 - energy is calculated from each valid 15-minute point as `kW × 0.25`
@@ -55,6 +56,21 @@ When enabled in options:
 - the full PND archive is saved only to JSON
 - Home Assistant attributes expose only small aggregates, not the full 15-minute dataset
 - PND is refreshed on its own interval, recommended `60` minutes or more
+
+## Recommended PND architecture
+
+For the most robust PND setup, use the companion add-on located in:
+
+`addon/cez_pnd_fetcher`
+
+Why:
+
+- some ČEZ PND requests behave differently from Home Assistant Core than from a separate add-on/container runtime
+- the companion add-on writes the latest successful raw chart payload to:
+  `/config/cez_distribuce_readings/pnd_export_<device_set_id>.json`
+- the integration then reads that export file and builds the normal PND sensors, archives and diagnostics from it
+
+This keeps the fragile PND transport outside Home Assistant Core while leaving all sensor/entity logic inside the integration.
 
 ## Configuration and options
 
@@ -73,6 +89,15 @@ Optional PND settings in options:
 - `PND idDeviceSet`
 - `PND idAssembly` (default `-1001`)
 - `PND update interval` in minutes (minimum `30`, recommended `60` to `180`)
+
+## Companion add-on
+
+This repository now also contains a companion Home Assistant app scaffold in:
+
+`addon/cez_pnd_fetcher`
+
+It is intentionally kept in a separate top-level folder so it can later be moved
+to its own repository without changing the integration structure.
 
 ## Health and error visibility
 

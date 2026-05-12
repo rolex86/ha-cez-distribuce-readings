@@ -41,7 +41,9 @@ def _sanitize_pnd_archive(archive: dict[str, Any], status: dict[str, Any]) -> di
             "ok": status.get("ok"),
             "using_cached_data": status.get("using_cached_data"),
             "error_type": status.get("error_type"),
+            "source": status.get("source"),
         },
+        "external_export_path": archive.get("external_export_path") or status.get("export_path"),
     }
 
 

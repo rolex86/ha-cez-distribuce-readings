@@ -250,6 +250,33 @@ def save_pnd_archive(
     return {"json_path": str(json_path)}
 
 
+def external_pnd_export_path(archive_dir: Path, device_set_id: str) -> Path:
+    """Return the expected companion add-on export path for one device set."""
+    return archive_dir / f"pnd_export_{_safe_filename(str(device_set_id))}.json"
+
+
+def load_external_pnd_export(
+    archive_dir: Path,
+    device_set_id: str | int,
+) -> dict[str, Any] | None:
+    """Load raw PND export written by the companion add-on, if it exists."""
+    json_path = external_pnd_export_path(archive_dir, str(device_set_id))
+
+    if not json_path.exists():
+        return None
+
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    data.setdefault("export_path", str(json_path))
+    return data
+
+
 def load_pnd_archive(archive_dir: Path, key: str) -> dict[str, Any] | None:
     """Load full PND archive from a JSON file, if it exists."""
     json_path = archive_dir / f"pnd_{_safe_filename(key)}.json"

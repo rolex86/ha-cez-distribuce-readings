@@ -23,7 +23,9 @@ from .const import DOMAIN, MIN_PND_UPDATE_INTERVAL_MIN
 from .pnd import (
     build_pnd_archive,
     current_month_interval,
+    external_pnd_export_path,
     format_pnd_datetime,
+    load_external_pnd_export,
     load_pnd_archive,
     save_pnd_archive,
 )
@@ -166,6 +168,8 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_pnd_warmup_url: str | None = None
         self._last_pnd_data_status_code: int | None = None
         self._last_pnd_data_url: str | None = None
+        self._last_pnd_source: str | None = None
+        self._last_pnd_export_path: str | None = None
 
     def _pnd_diag_attributes(self) -> dict[str, Any]:
         """Return compact diagnostics for the last PND attempt."""
@@ -176,6 +180,8 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "warmup_url": self._last_pnd_warmup_url,
             "data_status_code": self._last_pnd_data_status_code,
             "data_url": self._last_pnd_data_url,
+            "source": self._last_pnd_source,
+            "export_path": self._last_pnd_export_path,
         }
 
     def _build_pnd_status(
@@ -290,6 +296,43 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             password=self.client.password,
         )
 
+    def _load_external_pnd_archive(
+        self,
+        archive_dir: Path,
+        interval_from: str,
+        interval_to: str,
+    ) -> dict[str, Any] | None:
+        """Load chart payload exported by the companion add-on, if available."""
+        export_data = load_external_pnd_export(archive_dir, self.pnd_device_set_id)
+        if not export_data:
+            return None
+
+        payload = export_data.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("External PND export has no payload object")
+
+        self._last_pnd_source = "external_export"
+        self._last_pnd_export_path = str(
+            export_data.get("export_path")
+            or external_pnd_export_path(archive_dir, self.pnd_device_set_id)
+        )
+        self._last_pnd_warmup_status_code = export_data.get("warmup_status_code")
+        self._last_pnd_warmup_url = export_data.get("warmup_url")
+        self._last_pnd_data_status_code = export_data.get("data_status_code")
+        self._last_pnd_data_url = export_data.get("data_url")
+
+        export_interval_from = str(export_data.get("interval_from") or interval_from)
+        export_interval_to = str(export_data.get("interval_to") or interval_to)
+        archive = build_pnd_archive(payload, export_interval_from, export_interval_to)
+        archive["external_export_path"] = self._last_pnd_export_path
+        archive["pnd_source"] = "external_export"
+
+        _LOGGER.warning(
+            "Using external PND export file: %s",
+            self._last_pnd_export_path,
+        )
+        return archive
+
     def _fetch_pnd_archive(self, now: datetime) -> dict[str, Any]:
         """Fetch one fresh PND archive using a brand new isolated PND session."""
         interval_start, interval_end = current_month_interval(now)
@@ -301,6 +344,30 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_pnd_warmup_url = None
         self._last_pnd_data_status_code = None
         self._last_pnd_data_url = None
+        self._last_pnd_source = None
+        self._last_pnd_export_path = None
+        archive_dir = Path(self.hass.config.path("cez_distribuce_readings"))
+
+        try:
+            external_archive = self._load_external_pnd_archive(
+                archive_dir,
+                interval_from,
+                interval_to,
+            )
+        except Exception as err:
+            _LOGGER.warning("Unable to load external PND export, falling back to direct fetch: %s", err)
+        else:
+            if external_archive is not None:
+                self._last_pnd_fetch = now
+                self._last_pnd_success_at = now
+                _LOGGER.warning(
+                    "PND parser result: measurements_count=%s total_kwh=%s max_kw=%s source=%s",
+                    external_archive.get("measurements_count"),
+                    external_archive.get("total_kwh"),
+                    external_archive.get("max_kw"),
+                    self._last_pnd_source,
+                )
+                return external_archive
 
         for attempt in range(2):
             pnd_client = self._new_pnd_client()
@@ -315,14 +382,17 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_pnd_warmup_url = pnd_client.last_warmup_url
                 self._last_pnd_data_status_code = pnd_client.last_data_status_code
                 self._last_pnd_data_url = pnd_client.last_data_url
+                self._last_pnd_source = type(pnd_client).__name__
                 archive = build_pnd_archive(payload, interval_from, interval_to)
+                archive["pnd_source"] = self._last_pnd_source
                 self._last_pnd_fetch = now
                 self._last_pnd_success_at = now
                 _LOGGER.warning(
-                    "PND parser result: measurements_count=%s total_kwh=%s max_kw=%s",
+                    "PND parser result: measurements_count=%s total_kwh=%s max_kw=%s source=%s",
                     archive.get("measurements_count"),
                     archive.get("total_kwh"),
                     archive.get("max_kw"),
+                    self._last_pnd_source,
                 )
                 return archive
             except Exception as err:
@@ -330,6 +400,7 @@ class CezDistribuceCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_pnd_warmup_url = pnd_client.last_warmup_url
                 self._last_pnd_data_status_code = pnd_client.last_data_status_code
                 self._last_pnd_data_url = pnd_client.last_data_url
+                self._last_pnd_source = type(pnd_client).__name__
                 last_error = err
                 if attempt >= 1 or not self._should_retry_pnd_after_relogin(err):
                     break

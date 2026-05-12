@@ -484,6 +484,8 @@ class CezReadingSensor(CoordinatorEntity[CezDistribuceCoordinator], SensorEntity
                 "pnd_interval_to": archive.get("interval_to"),
                 "pnd_measurements_count": archive.get("measurements_count"),
                 "pnd_json_path": archive.get("json_path"),
+                "pnd_source": status.get("source") or archive.get("pnd_source"),
+                "pnd_external_export_path": status.get("export_path") or archive.get("external_export_path"),
             }
 
             if kind == "pnd_health":
