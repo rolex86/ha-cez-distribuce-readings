@@ -266,12 +266,23 @@ def load_external_pnd_export(
         return None
 
     try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
+        raw_text = json_path.read_text(encoding="utf-8-sig")
+    except OSError as err:
+        raise ValueError(f"External PND export cannot be read: {json_path}: {err}") from err
+
+    if not raw_text.strip():
+        raise ValueError(f"External PND export is empty: {json_path}")
+
+    try:
+        data = json.loads(raw_text)
+    except (ValueError, TypeError) as err:
+        raise ValueError(f"External PND export is not valid JSON: {json_path}: {err}") from err
 
     if not isinstance(data, dict):
-        return None
+        raise ValueError(
+            f"External PND export root must be a JSON object: {json_path} "
+            f"(got {type(data).__name__})"
+        )
 
     data.setdefault("export_path", str(json_path))
     return data
